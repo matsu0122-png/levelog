@@ -1,0 +1,15 @@
+# Environment
+.env
+
+# Backend (Go)
+backend/api
+backend/*.exe
+
+# Frontend (Node)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor
+.DS_Store
+*.log

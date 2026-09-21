@@ -1,0 +1,100 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #05070d;
+  --color-surface: #0d1220;
+  --color-surface-raised: #131a2c;
+  --color-border: #1f2a44;
+  --color-accent: #22d3ee;
+  --color-accent-strong: #38bdf8;
+  --color-accent-soft: #0891b21a;
+  --color-text: #e5edf7;
+  --color-text-dim: #8b97b0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Hiragino Kaku Gothic ProN', 'Noto Sans JP',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: #04121a;
+}
+
+/* Comfortable large tap targets on mobile, per spec. */
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@keyframes levelup-pop {
+  0% {
+    transform: scale(0.85);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.03);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes levelup-glow {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes levelup-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+.animate-levelup-pop {
+  animation: levelup-pop 360ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.animate-levelup-glow {
+  animation: levelup-glow 2.2s ease-in-out infinite;
+}
+
+.animate-levelup-ring {
+  animation: levelup-ring 1.8s cubic-bezier(0.15, 0.6, 0.4, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-levelup-pop,
+  .animate-levelup-glow,
+  .animate-levelup-ring {
+    animation: none;
+  }
+}
