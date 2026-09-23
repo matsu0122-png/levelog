@@ -29,7 +29,7 @@ func (h *DailyMissionHandler) Today(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	result, err := h.missions.GetToday(r.Context(), user.ID)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, todayResponse{
@@ -59,7 +59,7 @@ func (h *DailyMissionHandler) History(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.missions.GetHistory(r.Context(), user.ID, days)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	out := make([]historyDayResponse, len(result))
@@ -87,7 +87,7 @@ func (h *DailyMissionHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	result, err := h.missions.CompleteDailyMission(r.Context(), user.ID, id)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, completeResponse{
@@ -108,7 +108,7 @@ func (h *DailyMissionHandler) Uncomplete(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	result, err := h.missions.UncompleteDailyMission(r.Context(), user.ID, id)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, uncompleteResponse{

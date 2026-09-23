@@ -24,13 +24,13 @@ func RequireAuth(auth *service.AuthService) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie(SessionCookieName)
 			if err != nil {
-				httpx.WriteError(w, apperror.Unauthorized("認証が必要です"))
+				httpx.WriteError(w, r, apperror.Unauthorized("認証が必要です"))
 				return
 			}
 
 			user, err := auth.ValidateSession(r.Context(), cookie.Value)
 			if err != nil {
-				httpx.WriteError(w, err)
+				httpx.WriteError(w, r, err)
 				return
 			}
 

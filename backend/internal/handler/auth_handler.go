@@ -39,7 +39,13 @@ func (h *AuthHandler) setSessionCookie(w http.ResponseWriter, token string) {
 		Domain:   h.cfg.CookieDomain,
 		HttpOnly: true,
 		Secure:   h.cfg.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
+		// Strict, not Lax: every legitimate request that carries this
+		// cookie is same-origin (frontend/nginx-locations.conf proxies
+		// /api/ same-origin; there is no cross-site navigation flow that
+		// needs the cookie attached), so there's no functionality Lax
+		// would preserve that Strict doesn't. Strict is the stronger CSRF
+		// mitigation of the two — see docs/security-review.md.
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int((30 * 24 * time.Hour).Seconds()),
 	})
 }
@@ -52,7 +58,7 @@ func (h *AuthHandler) clearSessionCookie(w http.ResponseWriter) {
 		Domain:   h.cfg.CookieDomain,
 		HttpOnly: true,
 		Secure:   h.cfg.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
 }
@@ -60,18 +66,18 @@ func (h *AuthHandler) clearSessionCookie(w http.ResponseWriter) {
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	user, err := h.auth.Register(r.Context(), req.Email, req.Password, req.Timezone)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 
 	token, _, err := h.auth.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	h.setSessionCookie(w, token)
@@ -86,12 +92,12 @@ type loginRequest struct {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	token, user, err := h.auth.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	h.setSessionCookie(w, token)

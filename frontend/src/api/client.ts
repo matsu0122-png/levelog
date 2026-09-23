@@ -8,6 +8,16 @@ export class ApiError extends Error {
   }
 }
 
+// AuthContext registers a handler here on mount so that a 401 from *any*
+// API call (not just the initial session check) clears the stale session
+// and lets the router redirect to /login, instead of every page having to
+// special-case session expiry itself.
+type UnauthorizedHandler = () => void
+let unauthorizedHandler: UnauthorizedHandler | null = null
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
+  unauthorizedHandler = handler
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -25,6 +35,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       if (body?.error?.message) message = body.error.message
     } catch {
       // ignore non-JSON error bodies
+    }
+    if (res.status === 401) {
+      unauthorizedHandler?.()
     }
     throw new ApiError(res.status, message)
   }

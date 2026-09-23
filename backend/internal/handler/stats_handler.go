@@ -27,7 +27,7 @@ func (h *StatsHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	result, err := h.missions.GetStats(r.Context(), user.ID)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, statsResponse{
@@ -49,7 +49,7 @@ func (h *StatsHandler) XPHistory(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	txns, err := h.xp.ListRecent(r.Context(), user.ID, 50)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	out := make([]xpTransactionResponse, len(txns))

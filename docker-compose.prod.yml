@@ -1,0 +1,96 @@
+# Production-shaped container topology: only `api` and `web` (Nginx serving
+# the built React app + proxying /api and /health to `api`). No `db` service
+# here on purpose — the production database is a separate, independently
+# managed appliance (see docs/production-roadmap.md phase 9), reached only
+# through DATABASE_URL, never started by this file.
+#
+# Two ways this file gets used (see docs/deployment-design.md, phase 13):
+#   - CD pipeline on the app servers: `docker compose -f docker-compose.prod.yml
+#     pull && docker compose -f docker-compose.prod.yml up -d` — pulls the
+#     prebuilt image (`image:` below) built and pushed to GHCR by
+#     .github/workflows/cd.yml, does NOT build locally. IMAGE_TAG selects
+#     which pushed image (defaults to `latest`; the CD workflow always sets
+#     it explicitly to a commit SHA so a deploy's image is pinned, not
+#     whatever `latest` happens to point at when it runs).
+#   - Local verification (phases 4/11 style): `docker compose -f
+#     docker-compose.prod.yml up -d --build` — builds from the `build:`
+#     context below instead, ignoring the registry entirely. `--build` is
+#     required for this path; without it, Compose will try to pull `image:`
+#     first (see the required env note above the `services:` block).
+#
+# Required env (no defaults on purpose — must be supplied by the deploy
+# environment, never committed): DATABASE_URL, FRONTEND_ORIGIN, COOKIE_DOMAIN
+#
+# For local verification only (NOT the production wiring): do NOT merge
+# this file with `-f docker-compose.yml -f docker-compose.prod.yml`. Compose
+# merges (unions) list fields like `ports` across -f files rather than
+# letting an override clear them, so a merged run would still publish `api`
+# on the host via the dev file's port mapping — masking exactly the thing
+# this file is meant to guarantee. Instead start the dev db on its own,
+# then bring up this file completely separately (same default project name
+# = same directory = same network, so `api` can still reach `db` by name).
+# Force VITE_API_BASE_URL empty explicitly — otherwise Compose auto-loads
+# the dev value from the repo root .env (used by the dev `web` service) and
+# it leaks into this build, defeating the same-origin proxy. TLS_CERT_DIR
+# must point at a directory with fullchain.pem/privkey.pem (see
+# docs/tls-design.md — a self-signed pair is fine for this kind of local
+# verification, since real certs need a real public domain):
+#   docker compose -f docker-compose.yml up -d db
+#   DATABASE_URL=postgres://levelog:levelog@db:5432/levelog?sslmode=disable \
+#   FRONTEND_ORIGIN=https://localhost COOKIE_SECURE=false \
+#   VITE_API_BASE_URL= TLS_CERT_DIR=/path/to/local/certs \
+#   HTTP_PORT=8080 HTTPS_PORT=8443 \
+#     docker compose -f docker-compose.prod.yml up -d --build api web
+
+services:
+  api:
+    image: ghcr.io/matsu0122-png/levelog-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      METRICS_PORT: 9090
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:?FRONTEND_ORIGIN must be set}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Port 8080 (the app itself) is NOT published to the host: only `web`
+    # is internet-facing, and other containers on this network reach it at
+    # api:8080 via `expose`. Port 9090 (the /metrics-only server, see
+    # backend/internal/config) IS published, but bound to 127.0.0.1 only —
+    # readable by the Grafana Alloy agent running on the same host (see
+    # docs/monitoring-design.md) but not reachable off the box, same
+    # posture as node_exporter (terraform/modules/app_server). See the
+    # usage note above for why merging with -f docker-compose.yml does NOT
+    # actually clear a `ports: []` here — this list is non-empty now, so
+    # that caveat no longer applies to this service.
+    ports:
+      - "127.0.0.1:9090:9090"
+    expose:
+      - "8080"
+
+  web:
+    image: ghcr.io/matsu0122-png/levelog-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: ./frontend
+      args:
+        # Empty on purpose: same-origin, routed through nginx.conf's /api/
+        # proxy. Only override if the frontend and API are on different
+        # origins.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    # TLS is terminated in this container's Nginx (see frontend/nginx.conf)
+    # — the Sakura Cloud load balancer in front of it is a plain TCP
+    # pass-through with no termination of its own. The certs directory is
+    # read-only and must contain fullchain.pem/privkey.pem readable by
+    # nginx-unprivileged's uid (101) — see docs/tls-design.md.
+    volumes:
+      - ${TLS_CERT_DIR:?TLS_CERT_DIR must be set to a directory containing fullchain.pem and privkey.pem}:/etc/nginx/tls:ro
+    ports:
+      - "${HTTP_PORT:-80}:8080"
+      - "${HTTPS_PORT:-443}:8443"

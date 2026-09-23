@@ -25,6 +25,8 @@ type fakeStore struct {
 	usersByID    map[string]*model.User
 	usersByEmail map[string]string // email -> id
 
+	sessionsByHash map[string]*model.Session
+
 	templates map[string]*model.MissionTemplate
 
 	dailyMissions map[string]*model.DailyMission
@@ -34,10 +36,11 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		usersByID:     map[string]*model.User{},
-		usersByEmail:  map[string]string{},
-		templates:     map[string]*model.MissionTemplate{},
-		dailyMissions: map[string]*model.DailyMission{},
+		usersByID:      map[string]*model.User{},
+		usersByEmail:   map[string]string{},
+		sessionsByHash: map[string]*model.Session{},
+		templates:      map[string]*model.MissionTemplate{},
+		dailyMissions:  map[string]*model.DailyMission{},
 	}
 }
 
@@ -80,6 +83,65 @@ func (f *fakeStore) GetByID(ctx context.Context, id string) (*model.User, error)
 	}
 	cp := *u
 	return &cp, nil
+}
+
+// --- SessionRepository ---
+
+func (f *fakeStore) SCreate(ctx context.Context, s *model.Session) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s.ID == "" {
+		s.ID = f.nextID("session")
+	}
+	cp := *s
+	f.sessionsByHash[s.TokenHash] = &cp
+	return nil
+}
+
+func (f *fakeStore) SGetByTokenHash(ctx context.Context, tokenHash string) (*model.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessionsByHash[tokenHash]
+	if !ok {
+		return nil, nil
+	}
+	cp := *s
+	return &cp, nil
+}
+
+func (f *fakeStore) SDeleteByTokenHash(ctx context.Context, tokenHash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.sessionsByHash, tokenHash)
+	return nil
+}
+
+func (f *fakeStore) SDeleteExpired(ctx context.Context, now time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for hash, s := range f.sessionsByHash {
+		if s.ExpiresAt.Before(now) {
+			delete(f.sessionsByHash, hash)
+			n++
+		}
+	}
+	return n, nil
+}
+
+type sessionRepoAdapter struct{ s *fakeStore }
+
+func (a sessionRepoAdapter) Create(ctx context.Context, s *model.Session) error {
+	return a.s.SCreate(ctx, s)
+}
+func (a sessionRepoAdapter) GetByTokenHash(ctx context.Context, tokenHash string) (*model.Session, error) {
+	return a.s.SGetByTokenHash(ctx, tokenHash)
+}
+func (a sessionRepoAdapter) DeleteByTokenHash(ctx context.Context, tokenHash string) error {
+	return a.s.SDeleteByTokenHash(ctx, tokenHash)
+}
+func (a sessionRepoAdapter) DeleteExpired(ctx context.Context, now time.Time) (int64, error) {
+	return a.s.SDeleteExpired(ctx, now)
 }
 
 // --- MissionTemplateRepository ---
@@ -414,4 +476,8 @@ func (c *fakeClock) Now() time.Time { return c.now }
 
 func newMissionServiceForTest(s *fakeStore, clock Clock) *MissionService {
 	return NewMissionService(s, templateRepoAdapter{s: s}, dailyRepoAdapter{s: s}, s, clock)
+}
+
+func newAuthServiceForTest(s *fakeStore, clock Clock) *AuthService {
+	return NewAuthService(s, sessionRepoAdapter{s: s}, clock)
 }

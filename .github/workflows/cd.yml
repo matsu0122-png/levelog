@@ -1,0 +1,167 @@
+name: CD
+
+# Two triggers:
+#   - workflow_run: CI succeeding on main auto-deploys to staging only.
+#     Production is never touched by this path.
+#   - workflow_dispatch: manual, for a first deploy to a given environment,
+#     a deliberate production release, or a rollback (set image_tag to an
+#     older value). The `environment:` on the deploy jobs below ties into
+#     GitHub's Environment protection rules (configured in repo settings,
+#     not expressible in this file) — a required-reviewer rule on the
+#     `production` environment is how a human approval gate actually gets
+#     enforced; see docs/deployment-design.md.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        type: choice
+        options: [staging, production]
+        default: staging
+        required: true
+      image_tag:
+        description: "Image tag to deploy. Leave empty to build+push the current main HEAD; set to a previously-pushed tag (a commit SHA) to roll back without rebuilding."
+        type: string
+        required: false
+
+concurrency:
+  group: cd-${{ inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  resolve:
+    name: Resolve deploy target
+    runs-on: ubuntu-latest
+    # workflow_run only auto-deploys a successful run of CI on main; a
+    # manual workflow_dispatch is always allowed through (its inputs picked
+    # the environment deliberately).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      environment: ${{ steps.resolve.outputs.environment }}
+      is_rollback: ${{ steps.resolve.outputs.is_rollback }}
+    steps:
+      - id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            environment="${{ inputs.environment }}"
+            sha="${{ github.sha }}"
+          else
+            # workflow_run: CI passed on main. Auto path is staging-only —
+            # see the comment on `on:` above.
+            environment="staging"
+            sha="${{ github.event.workflow_run.head_sha }}"
+          fi
+
+          tag="${{ inputs.image_tag }}"
+          is_rollback="false"
+          if [ -z "$tag" ]; then
+            tag="$sha"
+          else
+            is_rollback="true"
+          fi
+
+          {
+            echo "sha=$sha"
+            echo "tag=$tag"
+            echo "environment=$environment"
+            echo "is_rollback=$is_rollback"
+          } >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Build & push images
+    needs: resolve
+    # Skipped for a rollback: redeploying an image tag that was already
+    # built and pushed by some earlier run, not rebuilt from a (possibly
+    # unrelated) current checkout. This is the whole point of rolling back
+    # by tag instead of by reverting the branch and redeploying HEAD.
+    if: needs.resolve.outputs.is_rollback == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push backend
+        run: |
+          image=ghcr.io/${{ github.repository }}-backend
+          docker build -t "$image:${{ needs.resolve.outputs.tag }}" -t "$image:latest" ./backend
+          docker push "$image:${{ needs.resolve.outputs.tag }}"
+          docker push "$image:latest"
+      - name: Build & push frontend
+        run: |
+          image=ghcr.io/${{ github.repository }}-frontend
+          docker build -t "$image:${{ needs.resolve.outputs.tag }}" -t "$image:latest" ./frontend
+          docker push "$image:${{ needs.resolve.outputs.tag }}"
+          docker push "$image:latest"
+
+  deploy-staging:
+    name: Deploy (staging)
+    needs: [resolve, build-and-push]
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      (needs.build-and-push.result == 'success' || needs.build-and-push.result == 'skipped') &&
+      needs.resolve.outputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy image tag ${{ needs.resolve.outputs.tag }} to staging
+        env:
+          DEPLOY_HOST: ${{ secrets.STAGING_APP_SERVER_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          IMAGE_TAG: ${{ needs.resolve.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: ./.github/scripts/deploy-host.sh
+
+  deploy-production:
+    name: Deploy (production, ${{ matrix.host_label }})
+    needs: [resolve, build-and-push]
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      (needs.build-and-push.result == 'success' || needs.build-and-push.result == 'skipped') &&
+      needs.resolve.outputs.environment == 'production'
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      # One app server at a time: with only two behind the load balancer,
+      # deploying both at once means both fail their health check together
+      # and the LB has nothing left to route to. See docs/tls-design.md
+      # section 7 for the same one-at-a-time assumption in the failover
+      # test plan.
+      max-parallel: 1
+      matrix:
+        include:
+          - host_label: app-1
+            host_secret: PRODUCTION_APP_SERVER_HOST_1
+          - host_label: app-2
+            host_secret: PRODUCTION_APP_SERVER_HOST_2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy image tag ${{ needs.resolve.outputs.tag }} to ${{ matrix.host_label }}
+        env:
+          DEPLOY_HOST: ${{ secrets[matrix.host_secret] }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          IMAGE_TAG: ${{ needs.resolve.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: ./.github/scripts/deploy-host.sh

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"levelog/backend/internal/model"
 )
@@ -42,4 +43,17 @@ func (r *SessionRepo) GetByTokenHash(ctx context.Context, tokenHash string) (*mo
 func (r *SessionRepo) DeleteByTokenHash(ctx context.Context, tokenHash string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
 	return err
+}
+
+// DeleteExpired removes every session whose expires_at is before now,
+// returning the number of rows removed. Called periodically (see
+// service.RunSessionCleanupLoop) so the sessions table doesn't grow
+// unbounded — nothing else prunes it (flagged as a gap since phase 2,
+// closed in phase 18; see docs/production-roadmap.md).
+func (r *SessionRepo) DeleteExpired(ctx context.Context, now time.Time) (int64, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, now)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

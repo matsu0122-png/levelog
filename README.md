@@ -104,7 +104,7 @@ go test ./...
 go vet ./...
 ```
 
-ビジネスロジック（`internal/service`）はリポジトリをinterfaceとして扱っており、テストではPostgresを使わないインメモリ実装（`fakes_test.go`）に差し替えてXPの整合性・権限チェック・日付チェックを検証しています。含まれるテスト:
+ビジネスロジック（`internal/service`）はリポジトリをinterfaceとして扱っており、テストではPostgresを使わないインメモリ実装（`fakes_test.go`）に差し替えてXPの整合性・権限チェック・日付チェックを検証しています。`config` / `httpx` / `middleware` パッケージにも依存なしのユニットテストがあります。含まれるテスト:
 
 - `levelup` パッケージ: XPからレベル・進捗を計算するテスト
 - `service` パッケージ:
@@ -116,6 +116,27 @@ go vet ./...
   - 他ユーザーのミッションを変更できない
   - デイリーミッションが重複生成されない
   - 難易度とXPの対応が正しい
+- `config` パッケージ: 環境変数の読み込み・デフォルト値・不正な値でのエラー
+- `httpx` パッケージ: JSON応答・エラー変換（apperror/タイムアウト/内部エラーの詳細を漏らさないこと）・リクエストデコード
+- `middleware` パッケージ: CORS（許可/非許可オリジン、プリフライト）、リクエストID、リクエストタイムアウト、構造化ログ出力
+
+#### 統合テスト（実際のPostgresを使用）
+
+`internal/handler` には、ルーター全体（ミドルウェア＋ハンドラー＋サービス＋リポジトリ）を実際のPostgresに対して検証する統合テストがあります。`TEST_DATABASE_URL` が未設定の場合はすべてスキップされるため、通常の `go test ./...` には影響しません。
+
+```bash
+docker compose up -d db
+TEST_DATABASE_URL="postgres://levelog:levelog@localhost:5432/levelog?sslmode=disable" \
+  go test ./internal/handler/... -v
+```
+
+含まれるテスト:
+
+- ヘルスチェック（`/health/live` / `/health/ready` / `/api/health`）、未定義ルートの404
+- 認証フロー（未認証アクセスの拒否、登録直後のログイン状態、誤ったパスワードの拒否、ログアウト後のセッション失効）
+- ミッションのライフサイクル（作成→今日のミッション生成→完了でXP付与→二重完了で追加付与なし→取り消しでXP相殺）
+- **XP二重付与防止（実DB・並行リクエスト）**: 同一デイリーミッションへ15並行で完了リクエストを送り、`SELECT ... FOR UPDATE`による行ロックにより最終的なXPが単発分しか加算されないことを検証（インメモリfakeでは検証できない、実トランザクションに依存するテスト）
+- 認可（他ユーザーのミッションテンプレート／デイリーミッションを閲覧・編集・削除・完了できないこと）
 
 ### フロントエンド（TypeScript）
 
@@ -123,7 +144,9 @@ go vet ./...
 cd frontend
 npm install
 npx tsc -b        # 型チェック
-npm run build      # ビルド確認
+npm run lint       # oxlint
+npm run test       # Vitest（AuthContextのセッション切れフロー、ErrorBoundary、404ページ、APIクライアント等）
+npm run build      # 本番ビルド確認
 ```
 
 ## 現在のMVPの機能
@@ -147,10 +170,77 @@ npm run build      # ビルド確認
 - 週間/月間の集計グラフ（現状は直近7日間の一覧表示のみ）
 - タイムゾーンの設定画面からの変更
 - パスワードリセット・メール確認フロー
-- レート制限やCSRFトークンなど、より厳格なAPIセキュリティ強化
-- Nginxを用いた本番向けリバースプロキシ・HTTPS終端（今回のMVPスコープ外）
+- 2要素認証
+
+アプリケーションレベルのレート制限・HTTPS終端は実装済みです（それぞれ「セキュリティ」節を参照）。
 
 ## 既知の制約
 
 - 過去日の履歴は、ユーザーがその日にアプリを開いて日次ミッションが生成された日のみ記録されます（深夜バッチ生成は仕様上行わないため）。
-- フロントエンドはDocker Compose内では開発用サーバー（`vite --host`）で配信しています。本番相当の静的配信・Nginx等は今回のMVPスコープ外です。
+
+## 本番用コンテナ構成
+
+`docker-compose.yml`（開発用、`db`込み・フロントエンドはVite devサーバー）とは別に、`docker-compose.prod.yml`を用意しています。
+
+- `backend/Dockerfile`: マルチステージビルド、`CGO_ENABLED=0`、非rootユーザー実行、`HEALTHCHECK`付き（`/health/live`）
+- `frontend/Dockerfile`: `vite build`の成果物を`nginxinc/nginx-unprivileged`（非root）で配信するマルチステージビルド。`nginx.conf`が`/api/`・`/health/`を同一オリジンでバックエンドへプロキシするため、ブラウザは常に単一オリジンとのみ通信し、本番のクロスオリジンCORS/Cookie設定を回避できます
+- `frontend/nginx.conf`: ポート8080（平文HTTP、`/health/`・`/healthz`以外はHTTPSへ301リダイレクト）とポート8443（TLS終端。証明書は`/etc/nginx/tls/`から読み込み）の2構成。TLSはロードバランサではなく各アプリサーバのNginxで終端します（詳細は`docs/tls-design.md`）
+- `docker-compose.prod.yml`は`db`を含みません。本番DBは別途管理されるアプライアンス（フェーズ9で構築済み）を`DATABASE_URL`経由で指定してください。`web`サービスは`TLS_CERT_DIR`（`fullchain.pem`・`privkey.pem`を含むディレクトリ）の指定が必須です
+
+```bash
+TLS_CERT_DIR=/path/to/certs docker compose -f docker-compose.prod.yml up -d --build
+```
+
+`DATABASE_URL` / `FRONTEND_ORIGIN` / `TLS_CERT_DIR`は必須（未設定だとエラーで起動しません）。`COOKIE_SECURE`は既定で`true`です。ホスト側のポートは既定で`HTTP_PORT=80` / `HTTPS_PORT=443`（環境変数で変更可）。ローカルで動作確認する場合は`docker-compose.yml`の`db`サービスを別途起動し、自己署名証明書を`TLS_CERT_DIR`に置いた上で、`docs/production-roadmap.md`のフェーズ4・11に記載した手順を参照してください（`-f`を2つ重ねてマージ起動すると`api`のポート公開設定が意図せず引き継がれるため非推奨です）。
+
+## CI
+
+`main`へのPull Request・push時に`.github/workflows/ci.yml`が以下を自動実行します（`terraform apply`やクラウド認証情報を要する処理は一切含みません）。
+
+- **secret-scan**: gitleaksによるリポジトリ全体（コミット履歴含む）の秘密情報混入チェック
+- **backend**: `gofmt`チェック・`go vet`・`go build`・`go test ./... -race`（フェイクリポジトリによるユニットテストのみ、DB接続なし）
+- **backend-integration**: Postgresサービスコンテナ（`postgres:16-alpine`）を使い、`go test ./internal/handler/... -v -race`で実DBに対する統合テスト（認証・ミッション・XP二重付与防止・認可）を実行
+- **frontend**: `tsc -b`（型チェック）・`npm run lint`（oxlint）・`npm run test -- --run`（Vitest）・`npm run build`
+- **docker-build**: `backend/Dockerfile` / `frontend/Dockerfile`のビルドが壊れていないことを確認（イメージのpush・レジストリ認証は行いません）
+- **terraform-fmt** / **terraform-validate**: `terraform fmt -check -recursive`と、staging/production両環境での`terraform validate`（さくらのクラウード認証情報は一切与えず、静的な構文・スキーマ検証のみ）
+
+## CD
+
+`.github/workflows/cd.yml`が、`main`でのCI成功をトリガーにstaging環境へ自動デプロイします（イメージをGHCRへビルド・push → SSHでアプリサーバへ`docker compose pull && up -d`）。production環境へのデプロイは常に`workflow_dispatch`による手動実行のみで、GitHub Environmentの`production`にRequired reviewersを設定して人の承認を必須にすることを想定しています。ロールバックは`workflow_dispatch`の`image_tag`入力に過去のコミットSHAを指定して再実行します。詳細な設計・必要なSecrets一覧は`docs/deployment-design.md`を参照してください。
+
+**注意**: アプリサーバ自体がまだ`terraform apply`されておらず実在しないため、このワークフローはまだ実行できません（デプロイ先のSecrets未設定）。
+
+## 監視・ログ
+
+- **アプリケーションメトリクス**: `GET /metrics`（`levelog_http_requests_total`・`levelog_http_request_duration_seconds`、Prometheusテキスト形式）を、アプリ本体（`PORT`、既定`8080`）とは別ポート（`METRICS_PORT`、既定`9090`）で公開しています。`docker-compose.prod.yml`はこのポートを`127.0.0.1`のみに公開し、外部からは到達できません
+- **node_exporter**: 各アプリサーバ上に`127.0.0.1:9100`でリッスンするsystemdサービスとして導入済み（`terraform/modules/app_server`）
+- **収集・転送**: 各アプリサーバ上で稼働するGrafana Alloy（`docker run --network host`のsystemdサービス）が、node_exporterとアプリの`/metrics`をスクレイプし、`api`/`web`コンテナのログをDockerソケット経由でtailして、Grafana Cloud（Prometheus互換メトリクス + Loki互換ログ）へアウトバウンドで送信します。インバウンドの穴は一切開けません
+- **外形監視**: さくらのクラウードの`simple_monitor`がstaging/production両環境の公開URLの`/health/live`を外部から定期チェックし、Slackへ通知します
+- 設計の詳細（選定理由・アラートルール案・必要な環境変数一覧・残課題）は`docs/monitoring-design.md`を参照してください。**Grafana Cloudアカウントの作成・APIキー発行はまだ行っていません**（各サーバーの`/etc/levelog/monitoring.env`への設定はアプリサーバ構築後の手動作業です）。
+
+## バックアップと復元
+
+- **PostgreSQL**: 日次バックアップに加え、production環境はPITR（継続バックアップ）を既定で有効化しています。PITR用のNFSストレージはTerraformが自己プロビジョニングするため、事前準備は不要です（`terraform/modules/database`）
+- **アプリサーバ**: 各サーバーのboot diskを週次でスナップショットバックアップしています（`sakuracloud_auto_backup`、`terraform/modules/app_server`）。`.env`・`monitoring.env`・TLS秘密鍵など、Git・Terraformいずれの管理下にもない手動投入ファイルを保護する目的です
+- 「バックアップ取得 → データ消失 → 復元 → アプリケーションからの疎通確認」という一連の流れは、ローカルの開発用Postgresに対して`pg_dump`/`pg_restore`で実際にリハーサル済みです。詳細・復元runbookは`docs/backup-restore-design.md`と`docs/database-design.md`8節を参照してください
+
+## セキュリティ
+
+- **認証**: bcryptによるパスワードハッシュ、`crypto/rand`製の32バイトセッショントークン（サーバーはハッシュのみ保存）、Cookieは`HttpOnly` / `Secure`（本番） / `SameSite=Strict`。ログイン・登録エンドポイントにはクライアントIP単位のレート制限を実装しています
+- **依存パッケージ・コンテナイメージの脆弱性スキャン**: `govulncheck`（Go）・`npm audit`（フロントエンド）・`trivy`（コンテナイメージ、HIGH/CRITICAL）をCI（`.github/workflows/ci.yml`）に組み込み、Pull Requestごとに継続的に検証します
+- **フロントエンドのHTTPヘッダー**: `Content-Security-Policy`（`default-src 'self'`）・`Strict-Transport-Security`に加え、既存の`X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy`を設定しています
+- ネットワーク境界（パケットフィルタ・ホストufw・Nginxルーティングの3層）、秘密情報の管理方針（`.tfvars`のgitignore等）を含む棚卸しの詳細は`docs/security-review.md`を参照してください
+
+## 障害試験・負荷試験
+
+- **片系停止試験**: 2インスタンス+Nginxのローカル構成で、稼働中に1台を強制停止しても失敗リクエスト0件（20万件超で検証）
+- **DB障害時の挙動**: DB停止中は`/health/ready`が503・`/health/live`は200を維持し、アプリケーションはクラッシュせず、DB復旧後は再起動なしで自動的に正常化することを確認
+- **ロールバック演習**: 実際のデプロイスクリプトのロジックで、新バージョンの不具合発覚後に旧バージョンへ戻して復旧できることを確認
+- **負荷試験**: `GET /api/missions`で、同時接続40〜50においてコネクションプール枯渇による性能崩壊（105 req/sまで低下）を発見し修正。修正後は同条件で70,000+ req/sを達成
+- 詳細・実機との違い・残課題は`docs/load-test-results.md`を参照してください
+
+## 運用手順書と公開判定
+
+18フェーズにわたる本番対応が完了しました。実際の運用手順は`docs/operations-runbook.md`(初回構築手順・日常デプロイ・障害対応・定期メンテナンス)、公開可否の判定は`docs/go-live-readiness.md`(判定結果・公開前必須チェックリスト)を参照してください。
+
+**判定結果: 条件付きGO** — コード・インフラ設計は本番公開の準備が整っていますが、実際の公開にはさくらのクラウードアカウントの用意・DNS設定・各種秘密情報の投入など、実在の認証情報を伴う一連の手動作業が必要です(詳細は`docs/go-live-readiness.md`2節)。

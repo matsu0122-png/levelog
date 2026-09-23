@@ -1,0 +1,289 @@
+#!/bin/bash
+# Sakura Cloud startup script (runs once, as root, on first boot).
+# Idempotent where practical, but not designed to be re-run on every boot.
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+# --- OS baseline -------------------------------------------------------
+apt-get update
+apt-get -y upgrade
+apt-get -y install curl ca-certificates gnupg ufw fail2ban unattended-upgrades certbot
+
+# Automatic security updates (unattended-upgrades ships with a sane
+# Ubuntu default config; this just turns it on).
+cat >/etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+
+# Host firewall as defense-in-depth behind the Sakura Cloud packet filter
+# (terraform/modules/network) — same allow-list, enforced at the OS level
+# too so a packet filter misconfiguration isn't the only thing standing
+# between the server and the internet. CIDR-scoped per source (not a bare
+# "allow 22/tcp" open to any source), rendered from the same
+# admin_ssh_cidrs/web_allowed_source_cidrs variables the packet filter
+# uses, so the two layers can't silently drift apart (phase 16 finding —
+# see docs/security-review.md).
+ufw default deny incoming
+ufw default allow outgoing
+%{ for cidr in admin_ssh_cidrs ~}
+ufw allow from ${cidr} to any port 22 proto tcp
+%{ endfor ~}
+%{ for cidr in web_allowed_source_cidrs ~}
+ufw allow from ${cidr} to any port 80 proto tcp
+ufw allow from ${cidr} to any port 443 proto tcp
+%{ endfor ~}
+ufw --force enable
+
+systemctl enable --now fail2ban
+
+# Password auth is already disabled at the Sakura Cloud disk_edit_parameter
+# level (disable_pw_auth); this additionally locks out root over SSH
+# entirely, so a leaked/guessed root password (however unlikely) still
+# can't be used to log in directly.
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+systemctl restart ssh 2>/dev/null || systemctl restart sshd
+
+# --- Deploy user ---------------------------------------------------------
+# A dedicated, non-root user for deployment/operations — decoupled from
+# whatever account name the base image happens to default to, and scoped
+# to exactly what it needs (docker group membership) rather than full sudo.
+id -u ${deploy_user} >/dev/null 2>&1 || useradd -m -s /bin/bash ${deploy_user}
+mkdir -p /home/${deploy_user}/.ssh
+cat >/home/${deploy_user}/.ssh/authorized_keys <<'EOF'
+${ssh_public_key}
+EOF
+chown -R ${deploy_user}:${deploy_user} /home/${deploy_user}/.ssh
+chmod 700 /home/${deploy_user}/.ssh
+chmod 600 /home/${deploy_user}/.ssh/authorized_keys
+
+# --- Docker ---------------------------------------------------------------
+if ! command -v docker >/dev/null 2>&1; then
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  ARCH=$(dpkg --print-architecture)
+  CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+  echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $CODENAME stable" \
+    >/etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+fi
+
+# Bounded JSON log driver: without this, a runaway container's logs can
+# fill the boot disk. Actual off-box log shipping (destination/agent) is
+# chosen and wired up separately — see docs/app-server-design.md.
+mkdir -p /etc/docker
+cat >/etc/docker/daemon.json <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "5" }
+}
+EOF
+
+systemctl enable --now docker
+usermod -aG docker ${deploy_user}
+
+mkdir -p /opt/levelog
+chown ${deploy_user}:${deploy_user} /opt/levelog
+
+# Where docker-compose.prod.yml's TLS_CERT_DIR mount points at. certbot is
+# installed above, but actually issuing the certificate is a deliberate
+# manual/documented step (needs DNS API credentials for the DNS-01
+# challenge this multi-backend-behind-an-LB setup calls for) rather than
+# something this unattended boot script can complete on its own — see
+# docs/tls-design.md.
+mkdir -p /opt/levelog/tls
+chown ${deploy_user}:${deploy_user} /opt/levelog/tls
+
+# Invoked over SSH by .github/workflows/cd.yml (see docs/deployment-design.md,
+# phase 13). Contains no secrets itself — docker-compose.prod.yml is synced
+# in by the calling workflow immediately before this runs, and .env
+# (DATABASE_URL etc.) is created here once, out-of-band, during initial
+# server setup, never by this script or by CI.
+cat >/opt/levelog/deploy.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+cd /opt/levelog
+
+: "$${IMAGE_TAG:?IMAGE_TAG must be set}"
+export IMAGE_TAG
+
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+
+for _ in $(seq 1 30); do
+  if curl -fsS http://localhost/health/ready >/dev/null; then
+    echo "deploy: health check passed"
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "deploy: health check did not pass within 60s" >&2
+exit 1
+EOF
+chmod 700 /opt/levelog/deploy.sh
+chown ${deploy_user}:${deploy_user} /opt/levelog/deploy.sh
+
+# --- Monitoring agent -------------------------------------------------
+# node_exporter, bound to localhost only (not reachable from the network —
+# a monitoring stack scrapes it over SSH tunnel / from the same host, or
+# this is revisited once the monitoring phase picks a concrete collection
+# path). Exposes OS-level metrics (CPU/memory/disk/etc.); application
+# metrics are separate (the Go API's own endpoints, if/when added).
+NODE_EXPORTER_VERSION="1.8.2"
+useradd --no-create-home --shell /usr/sbin/nologin node_exporter 2>/dev/null || true
+curl -fsSL "https://github.com/prometheus/node_exporter/releases/download/v$${NODE_EXPORTER_VERSION}/node_exporter-$${NODE_EXPORTER_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
+  -o /tmp/node_exporter.tar.gz
+tar -xzf /tmp/node_exporter.tar.gz -C /tmp
+install -m 0755 /tmp/node_exporter-$${NODE_EXPORTER_VERSION}.linux-$(dpkg --print-architecture)/node_exporter /usr/local/bin/node_exporter
+rm -rf /tmp/node_exporter.tar.gz /tmp/node_exporter-$${NODE_EXPORTER_VERSION}.linux-*
+
+cat >/etc/systemd/system/node_exporter.service <<'EOF'
+[Unit]
+Description=Prometheus Node Exporter
+After=network.target
+
+[Service]
+User=node_exporter
+ExecStart=/usr/local/bin/node_exporter --web.listen-address=127.0.0.1:9100
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now node_exporter
+
+# --- Monitoring agent: metrics/log shipping to Grafana Cloud -------------
+# Grafana Alloy scrapes node_exporter (above, 127.0.0.1:9100) and the app's
+# own /metrics (127.0.0.1:9090, published by docker-compose.prod.yml — see
+# backend/internal/config), and tails the api/web containers' JSON logs via
+# the Docker socket, then ships both to Grafana Cloud. See
+# docs/monitoring-design.md for why Grafana Cloud (vs. self-hosting
+# Prometheus/Loki) and why this runs as a `docker run` systemd service
+# rather than installing a second binary-management path alongside
+# node_exporter: Alloy needs the Docker socket (log discovery) AND
+# loopback access to node_exporter/the app's metrics port at the same
+# time, which is simplest with --network host, and Docker is already
+# installed on this box.
+#
+# --network host means the container shares the host's network namespace,
+# so --server.http.listen-addr below is set explicitly to keep Alloy's own
+# UI/API off the public NIC (same "loopback only" posture as node_exporter
+# and the app's metrics port).
+#
+# The config below contains no secrets — every credential is read at
+# runtime via sys.env(), sourced from /etc/levelog/monitoring.env. That
+# file is NOT created by this script or by Terraform (mirrors how
+# docker-compose.prod.yml's .env is handled — see docs/deployment-design.md
+# section 5): it must be created manually during initial server setup with
+# the real Grafana Cloud endpoint URLs and API key (docs/monitoring-design.md
+# lists exactly what it needs). Until then this service starts but every
+# sys.env() call resolves to an empty string, so Alloy runs, scrapes
+# successfully, and simply fails to push anywhere — logged, not silent,
+# and nothing crashes waiting on it.
+mkdir -p /etc/levelog /var/lib/levelog-alloy
+touch /etc/levelog/monitoring.env
+chmod 600 /etc/levelog/monitoring.env
+
+cat >/etc/levelog/alloy-config.alloy <<'EOF'
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+}
+
+loki.source.docker "default" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.containers.output
+	forward_to = [loki.write.grafana_cloud.receiver]
+	labels = {
+		environment = "${environment_name}",
+	}
+}
+
+loki.write "grafana_cloud" {
+	endpoint {
+		url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+
+		basic_auth {
+			username = sys.env("GRAFANA_CLOUD_LOKI_USER")
+			password = sys.env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+}
+
+prometheus.scrape "node" {
+	targets = [{
+		__address__ = "127.0.0.1:9100",
+	}]
+	forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+	job_name   = "levelog_node"
+}
+
+prometheus.scrape "levelog_api" {
+	targets = [{
+		__address__ = "127.0.0.1:9090",
+	}]
+	forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+	job_name   = "levelog_api"
+}
+
+prometheus.remote_write "grafana_cloud" {
+	endpoint {
+		url = sys.env("GRAFANA_CLOUD_PROMETHEUS_URL")
+
+		basic_auth {
+			username = sys.env("GRAFANA_CLOUD_PROMETHEUS_USER")
+			password = sys.env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+	external_labels = {
+		environment = "${environment_name}",
+	}
+}
+EOF
+
+cat >/etc/systemd/system/levelog-alloy.service <<'EOF'
+[Unit]
+Description=Grafana Alloy (metrics/log shipping to Grafana Cloud)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/levelog/monitoring.env
+ExecStartPre=-/usr/bin/docker rm -f levelog-alloy
+ExecStart=/usr/bin/docker run --rm --name levelog-alloy \
+  --network host \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /etc/levelog/alloy-config.alloy:/etc/alloy/config.alloy:ro \
+  -v /var/lib/levelog-alloy:/var/lib/alloy \
+  -e GRAFANA_CLOUD_LOKI_URL \
+  -e GRAFANA_CLOUD_LOKI_USER \
+  -e GRAFANA_CLOUD_PROMETHEUS_URL \
+  -e GRAFANA_CLOUD_PROMETHEUS_USER \
+  -e GRAFANA_CLOUD_API_KEY \
+  grafana/alloy:v1.19.2 run /etc/alloy/config.alloy --storage.path=/var/lib/alloy --server.http.listen-addr=127.0.0.1:12345
+ExecStop=/usr/bin/docker stop levelog-alloy
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now levelog-alloy
+
+echo "levelog app server provisioning complete" >/var/log/levelog-startup-complete

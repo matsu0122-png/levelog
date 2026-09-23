@@ -78,7 +78,7 @@ func (h *MissionHandler) List(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	templates, err := h.missions.ListTemplates(r.Context(), user.ID)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	out := make([]templateResponse, len(templates))
@@ -92,17 +92,17 @@ func (h *MissionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	var req templateRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	input, err := req.toInput()
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	t, err := h.missions.CreateTemplate(r.Context(), user.ID, input)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	t.ScheduleDays = input.Days
@@ -114,17 +114,17 @@ func (h *MissionHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req templateRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	input, err := req.toInput()
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	t, err := h.missions.UpdateTemplate(r.Context(), user.ID, id, input)
 	if err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	t.ScheduleDays = input.Days
@@ -135,7 +135,7 @@ func (h *MissionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	id := r.PathValue("id")
 	if err := h.missions.DeleteTemplate(r.Context(), user.ID, id); err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -150,11 +150,11 @@ func (h *MissionHandler) SetActive(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req setActiveRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	if err := h.missions.SetActive(r.Context(), user.ID, id, req.Active); err != nil {
-		httpx.WriteError(w, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})

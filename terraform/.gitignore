@@ -1,0 +1,25 @@
+# Provider binaries / module cache — re-created by `terraform init`.
+**/.terraform/
+
+# State files can contain resource attribute values (some sensitive) in
+# plain text; state belongs in the remote backend, never in Git.
+*.tfstate
+*.tfstate.*
+
+# Real variable values, including per-developer overrides. Broad on
+# purpose (*.tfvars, not just *.auto.tfvars): terraform.tfvars itself was
+# NOT covered before phase 16 (docs/security-review.md), which meant
+# nothing stopped a future `git add -A` from picking one up if it ever
+# grew a real secret despite the project's convention of keeping tfvars
+# non-secret. *.tfvars.example files (see environments/*/terraform.tfvars.example)
+# are unaffected — they end in .example, not .tfvars.
+*.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+crash.log
+crash.*.log
+
+# .terraform.lock.hcl is deliberately NOT ignored — Terraform's own
+# guidance is to commit it so provider version selection is reproducible.

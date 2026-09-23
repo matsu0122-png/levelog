@@ -142,6 +142,15 @@ func (s *AuthService) ValidateSession(ctx context.Context, rawToken string) (*mo
 	return user, nil
 }
 
+// CleanupExpiredSessions removes every session that has already expired,
+// returning how many were removed. Nothing else prunes the sessions table
+// (a session row otherwise lives forever even past its own expires_at —
+// ValidateSession just stops accepting it), so this is meant to be called
+// periodically — see RunSessionCleanupLoop.
+func (s *AuthService) CleanupExpiredSessions(ctx context.Context) (int64, error) {
+	return s.sessions.DeleteExpired(ctx, s.clock.Now())
+}
+
 func generateSessionToken() (raw string, hash string, err error) {
 	buf := make([]byte, sessionTokenBytes)
 	if _, err := rand.Read(buf); err != nil {

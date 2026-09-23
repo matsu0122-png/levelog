@@ -39,6 +39,10 @@ func Conflict(message string) *Error {
 	return New(http.StatusConflict, "CONFLICT", message)
 }
 
+func TooManyRequests(message string) *Error {
+	return New(http.StatusTooManyRequests, "TOO_MANY_REQUESTS", message)
+}
+
 func Internal(message string) *Error {
 	return New(http.StatusInternalServerError, "INTERNAL", message)
 }

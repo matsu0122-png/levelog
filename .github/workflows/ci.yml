@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+  NODE_VERSION: "24"
+  TERRAFORM_VERSION: "1.15.8"
+
+jobs:
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source=/repo -v --redact
+
+  backend:
+    name: Backend (format / vet / build / unit test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+      - name: gofmt check
+        run: |
+          diff="$(gofmt -l .)"
+          if [ -n "$diff" ]; then
+            echo "$diff"
+            echo "::error::gofmt found unformatted files (run 'gofmt -w .')"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go build
+        run: go build ./...
+      - name: go test (unit, race)
+        run: go test ./... -race
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  backend-integration:
+    name: Backend integration tests (Postgres)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: levelog
+          POSTGRES_PASSWORD: levelog
+          POSTGRES_DB: levelog
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U levelog"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+      - name: go test (integration, race)
+        env:
+          # Disposable service-container credentials, scoped to this job only
+          # (see docs/production-roadmap.md phase 5) — not a real secret.
+          TEST_DATABASE_URL: postgres://levelog:levelog@localhost:5432/levelog?sslmode=disable
+        run: go test ./internal/handler/... -v -race
+
+  frontend:
+    name: Frontend (typecheck / lint / test / build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc -b
+      - run: npm run lint
+      - run: npm run test -- --run
+      - run: npm run build
+      - name: npm audit (high/critical)
+        run: npm audit --audit-level=high
+
+  docker-build:
+    name: Docker image build check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t levelog-backend-ci ./backend
+      - name: Build frontend image
+        run: docker build -t levelog-frontend-ci ./frontend
+      # Fails the build on HIGH/CRITICAL findings in either image (base OS
+      # packages + the compiled Go binary / npm-installed frontend
+      # toolchain) — added in phase 16 after finding both base images had
+      # drifted onto EOL tags (docs/security-review.md). No registry
+      # credentials involved: this scans the images built above, locally,
+      # never pushes anywhere.
+      - name: Scan backend image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: levelog-backend-ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          # A HIGH/CRITICAL finding with no upstream fix yet would block
+          # every PR indefinitely for something no change here can resolve
+          # — only fail on findings we can actually act on (bump a base
+          # image / dependency).
+          ignore-unfixed: "true"
+      - name: Scan frontend image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: levelog-frontend-ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: "true"
+
+  terraform-fmt:
+    name: Terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - run: terraform fmt -check -recursive
+        working-directory: terraform
+
+  terraform-validate:
+    name: Terraform validate (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [staging, production]
+    defaults:
+      run:
+        working-directory: terraform/environments/${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      # No sakuracloud credentials are provided anywhere in this workflow on
+      # purpose — validate only does static config/schema checks and must
+      # never need real credentials or reach the actual cloud API (see
+      # docs/production-roadmap.md phases 7-11: terraform apply is never run
+      # outside an explicit, manually-approved session).
+      - run: terraform init -input=false
+      - run: terraform validate

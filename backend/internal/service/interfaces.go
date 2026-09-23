@@ -33,6 +33,7 @@ type SessionRepository interface {
 	Create(ctx context.Context, s *model.Session) error
 	GetByTokenHash(ctx context.Context, tokenHash string) (*model.Session, error)
 	DeleteByTokenHash(ctx context.Context, tokenHash string) error
+	DeleteExpired(ctx context.Context, now time.Time) (int64, error)
 }
 
 // MissionTemplateRepository persists recurring mission definitions and their

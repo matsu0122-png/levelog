@@ -1,0 +1,20 @@
+# Non-secret values only. db_admin_password / db_app_password have no value
+# here on purpose — supply via TF_VAR_* (or an equivalent secret-injection
+# mechanism at apply time). ssh_public_key and admin_ssh_cidrs aren't
+# secrets, but the real values aren't committed here either; set them via
+# -var or TF_VAR_* so this file stays identical in shape to production's
+# and nobody is tempted to treat "committed in tfvars" as safe for
+# anything. (admin IP addresses specifically also identify who has access
+# from where, which is reasonable to keep out of a public-readable file
+# even though it isn't a credential.)
+#
+# This file is a template: copy it to terraform.tfvars (gitignored — see
+# ../../.gitignore) to actually use it, or pass these same values via -var/
+# TF_VAR_* directly. Phase 16 made this explicit after finding that a plain
+# terraform.tfvars alongside this file would NOT have been gitignored (only
+# *.auto.tfvars was) — see docs/security-review.md.
+
+sakura_zone       = "tk1a"
+name_prefix       = "levelog-staging"
+db_admin_username = "levelog_migrate"
+db_app_username   = "levelog_app"

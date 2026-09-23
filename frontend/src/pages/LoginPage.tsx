@@ -1,16 +1,18 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { useAuth } from '../context/AuthContext'
 
 export function LoginPage() {
-  const { login } = useAuth()
+  const { login, sessionExpired, dismissSessionExpired } = useAuth()
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => dismissSessionExpired, [dismissSessionExpired])
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -33,6 +35,9 @@ export function LoginPage() {
         <p className="mb-8 text-center text-sm text-text-dim">自分に嘘をつかず、成長を記録する</p>
 
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
+          {sessionExpired && !error && (
+            <ErrorBanner message="セッションの有効期限が切れました。再度ログインしてください。" />
+          )}
           {error && <ErrorBanner message={error} />}
 
           <label className="flex flex-col gap-1.5 text-sm text-text-dim">

@@ -8,6 +8,7 @@ import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
 import { MissionFormPage } from './pages/MissionFormPage'
 import { MissionsPage } from './pages/MissionsPage'
+import { NotFoundPage } from './pages/NotFoundPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { SettingsPage } from './pages/SettingsPage'
 
@@ -112,7 +113,7 @@ export default function App() {
         }
       />
 
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   )
 }

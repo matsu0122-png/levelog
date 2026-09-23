@@ -3,12 +3,14 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"levelog/backend/internal/apperror"
+	"levelog/backend/internal/reqid"
 )
 
 func WriteJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -18,7 +20,7 @@ func WriteJSON(w http.ResponseWriter, status int, v interface{}) {
 		return
 	}
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("write json response: %v", err)
+		slog.Error("write json response", "err", err)
 	}
 }
 
@@ -32,16 +34,30 @@ type errorDetail struct {
 }
 
 // WriteError translates a service/repository error into an HTTP response.
-// *apperror.Error carries its own status code and message; anything else is
-// treated as an unexpected internal error and logged (never leaking details
-// to the client).
-func WriteError(w http.ResponseWriter, err error) {
+// *apperror.Error carries its own status code and message; a context
+// deadline/cancellation (the request-scoped timeout set by
+// middleware.Timeout expiring, usually while waiting on the database) maps
+// to 504; anything else is treated as an unexpected internal error, logged
+// with the request's correlation ID, and never leaked to the client.
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	ctx := r.Context()
+
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		slog.WarnContext(ctx, "request timeout", "request_id", reqid.FromContext(ctx), "err", err)
+		WriteJSON(w, http.StatusGatewayTimeout, errorBody{Error: errorDetail{Code: "TIMEOUT", Message: "リクエストがタイムアウトしました"}})
+		return
+	}
+
 	var aerr *apperror.Error
 	if errors.As(err, &aerr) {
+		if aerr.Status >= http.StatusInternalServerError {
+			slog.ErrorContext(ctx, "handler error", "request_id", reqid.FromContext(ctx), "code", aerr.Code, "err", err)
+		}
 		WriteJSON(w, aerr.Status, errorBody{Error: errorDetail{Code: aerr.Code, Message: aerr.Message}})
 		return
 	}
-	log.Printf("internal error: %v", err)
+
+	slog.ErrorContext(ctx, "internal error", "request_id", reqid.FromContext(ctx), "err", err)
 	WriteJSON(w, http.StatusInternalServerError, errorBody{Error: errorDetail{Code: "INTERNAL", Message: "予期しないエラーが発生しました"}})
 }
 

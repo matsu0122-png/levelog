@@ -137,6 +137,18 @@ func (r *TemplateRepo) GetByID(ctx context.Context, userID, id string) (*model.M
 	return t, nil
 }
 
+// ListByUser fetches every template's schedule days with one follow-up
+// query (scheduleDaysForMany) rather than one per template. The obvious
+// per-template loop (defer rows.Close(); for rows.Next() { ...
+// r.scheduleDaysFor(t.ID) ... }) holds this outer query's connection
+// checked out for the whole loop while also needing a second connection
+// per iteration for the inner query — under concurrent load approaching
+// the pool size (config.DBMaxOpenConns), that pattern starves the pool
+// (every in-flight request holds one connection and blocks on a second),
+// confirmed with a load test that collapsed throughput ~98% once
+// concurrency passed roughly 1.5x the pool size (see
+// docs/load-test-results.md). Closing rows before issuing any further
+// query avoids that entirely, on top of turning 1+N queries into 2.
 func (r *TemplateRepo) ListByUser(ctx context.Context, userID string) ([]model.MissionTemplate, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, user_id, title, description, difficulty, xp_reward, active, deleted_at, created_at, updated_at
@@ -145,20 +157,63 @@ func (r *TemplateRepo) ListByUser(ctx context.Context, userID string) ([]model.M
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	var out []model.MissionTemplate
 	for rows.Next() {
 		t, err := scanTemplate(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
-		days, err := r.scheduleDaysFor(ctx, t.ID)
-		if err != nil {
-			return nil, err
-		}
-		t.ScheduleDays = days
 		out = append(out, *t)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if len(out) == 0 {
+		return out, nil
+	}
+
+	ids := make([]string, len(out))
+	for i, t := range out {
+		ids[i] = t.ID
+	}
+	daysByTemplate, err := r.scheduleDaysForMany(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].ScheduleDays = daysByTemplate[out[i].ID]
+	}
+	return out, nil
+}
+
+// scheduleDaysForMany fetches schedule days for every template in
+// templateIDs in a single query (Postgres array parameter, natively
+// supported by the pgx driver — no pq.Array() needed), returning them
+// grouped by template ID. Not called while any other query's *sql.Rows is
+// still open — see ListByUser's comment above for why that matters.
+func (r *TemplateRepo) scheduleDaysForMany(ctx context.Context, templateIDs []string) (map[string][]model.Weekday, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT mission_template_id, day_of_week FROM mission_schedule_days
+		WHERE mission_template_id = ANY($1) ORDER BY mission_template_id, day_of_week
+	`, templateIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string][]model.Weekday, len(templateIDs))
+	for rows.Next() {
+		var templateID string
+		var d int
+		if err := rows.Scan(&templateID, &d); err != nil {
+			return nil, err
+		}
+		out[templateID] = append(out[templateID], model.Weekday(d))
 	}
 	return out, rows.Err()
 }
