@@ -12,3 +12,8 @@ output "load_balancer_vip" {
   description = "The virtual IP DNS points at."
   value       = module.load_balancer.vip_address
 }
+
+output "dns_fqdn" {
+  description = "Hostname this environment's A record answers for."
+  value       = module.dns.fqdn
+}

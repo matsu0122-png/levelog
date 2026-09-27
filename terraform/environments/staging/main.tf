@@ -53,3 +53,14 @@ module "monitoring" {
   target               = var.monitor_target
   notify_slack_webhook = var.monitor_slack_webhook
 }
+
+# staging.levelog.matsu0122.com -> the single app server (no load balancer
+# in staging). The zone is created by terraform/environments/dns (apply
+# that first), delegated from Vercel.
+module "dns" {
+  source = "../../modules/dns_record"
+
+  zone         = var.dns_zone
+  name         = "staging"
+  ipv4_address = module.app_server.public_ip_addresses[0]
+}

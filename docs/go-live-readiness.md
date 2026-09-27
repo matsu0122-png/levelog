@@ -25,10 +25,10 @@
 - [ ] さくらのクラウードの各種プラン名・イメージ名の最新値の確認(`os_type`・DBの`plan`/`database_version`・LBの`plan`など、コード中に「要確認」と明記した暫定値)
 - [ ] デプロイ用SSH鍵ペアの生成
 - [ ] 管理者IPアドレス(`admin_ssh_cidrs`)の確定
-- [ ] `matsu0122.com`ゾーンの管理場所の確認
-- [ ] `terraform apply`の実行(staging→production推奨順、production側は2段階ブートストラップに注意)
+- [x] `matsu0122.com`ゾーンの管理場所の確認 — Vercel。`levelog`以下をさくらのクラウードDNSに委任する(フェーズ20)
+- [ ] `terraform apply`の実行(dns→staging→productionの順、production側は2段階ブートストラップに注意)
 - [ ] `.env`・TLS証明書・`monitoring.env`の各アプリサーバへの手動投入
-- [ ] DNSレコードの設定
+- [ ] VercelへのNSレコード(`levelog`)の追加 — Aレコードは`terraform apply`で自動作成される
 - [ ] GitHub Secrets(`DEPLOY_SSH_KEY`等)・Environment保護ルールの設定
 
 **これらはすべて実在の認証情報・実際の費用発生・実際のドメイン制御を伴う操作であり、このセッションでは実施していない(実施できない、ではなく、プロジェクトの一貫した方針として実施しない)。**

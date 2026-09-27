@@ -1290,6 +1290,32 @@ READMEおよびコード確認の結果、以下がMVPとして実装済み。
 
 `docs/go-live-readiness.md`2節の手動チェックリストは変わらない(アカウント・APIキー・SSH鍵・`terraform apply`・秘密情報の投入・DNS・GitHub Secrets)。これに加えて、証明書の初回発行(`docs/operations-runbook.md`2.3節)とアラートルールのGrafana Cloudへの登録(`docs/monitoring-design.md`6.1節)が、アカウント作成後に1回ずつ必要。証明書の自動発行は、`matsu0122.com`ゾーンがさくらのクラウードDNSで管理されていることが前提。
 
+## フェーズ20:DNSのTerraform化(完了)
+
+ユーザーへの確認で、`matsu0122.com`ゾーンはVercelのDNSで管理されていることが分かった。フェーズ11から未確定だった「ゾーンの管理場所」が決まったので、DNSの構成を確定してTerraformで管理するようにした。
+
+### 実装内容
+
+- **構成**: `levelog.matsu0122.com`以下だけを、VercelからさくらのクラウードDNSに委任する(Vercelに追加するのは`levelog`のNSレコードのみ)。フェーズ19の証明書自動更新(`certbot-dns-sakuracloud`)がそのまま使える。VercelのAPIでDNS-01を行う案は、トークンの権限がVercelアカウント全体に及ぶため採用しなかった。
+- `terraform/environments/dns`(新規root module): ゾーン`levelog.matsu0122.com`を所有し、Vercelに登録するネームサーバーを`name_servers`として出力する。staging・productionの両方が使うゾーンなので、どちらの環境の`destroy`にも巻き込まれないよう独立したstateにした。
+- `terraform/modules/dns_record`(新規): ゾーンを名前で検索してAレコードを1つ作る。名前検索が部分一致であるため、ゾーン名が完全一致しない場合はplan時にエラーにする。productionは`@` → LBのVIP、stagingは`staging` → アプリサーバのIP。
+- CI: `terraform-validate`のmatrixに`dns`を追加し、`terraform-test`ジョブ(モックプロバイダによる`terraform test`)を追加した。
+- ドキュメント: `docs/tls-design.md`6節を書き直し、`docs/operations-runbook.md`2.1/2.2/2.3/2.4節・`docs/go-live-readiness.md`・`docs/staging-environment.md`・`terraform/README.md`・`README.md`を更新した。
+
+### 検証結果
+
+- `terraform fmt -check -recursive`が成功。`sacloud/sakuracloud`(v2.36.1)と`cyrilgdn/postgresql`をソースからビルドし、`dns`・`staging`・`production`の3環境すべてで`terraform validate`が成功した(この環境からはTerraformレジストリに接続できないため)。
+- `terraform test`(`modules/dns_record`、3ケース)がすべて合格: apexレコードの値・TTL・FQDN、サブドメインのFQDN、部分一致した別ゾーンの拒否。`postcondition`を外した版では、部分一致のテストが失敗することも確認した。
+- プロバイダのソースで、`sakuracloud_dns`の`record`属性がOptional+Computedであること(インラインで書かなければ`sakuracloud_dns_record`やcertbotのレコードを削除しない)、`sakuracloud_dns_record`がゾーン単位でロックを取ること、データソースが部分一致の先頭1件を返すことを確認した。
+
+### セキュリティ上の確認
+
+新たな秘密情報は増えていない(Terraformはこれまでと同じさくらのクラウードの認証情報を使う)。Vercel側の操作はNSレコードの追加だけで、Vercelの認証情報はリポジトリにもサーバーにも置かない。`terraform apply`・DNSの変更は実施していない。
+
+### 残っている課題
+
+`terraform/environments/dns`の`apply`と、VercelへのNSレコードの追加(`docs/operations-runbook.md`2.2節の0)。どちらもさくらのクラウードのアカウント作成後に行う。
+
 ---
 
 ここでロードマップの全フェーズが完了しました。実際の公開作業は`docs/go-live-readiness.md`と`docs/operations-runbook.md`を参照してください。

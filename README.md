@@ -205,7 +205,8 @@ TLS_CERT_DIR=/path/to/certs docker compose -f docker-compose.prod.yml up -d --bu
 - **docker-build**: `backend/Dockerfile` / `frontend/Dockerfile`のビルドが壊れていないことを確認（イメージのpush・レジストリ認証は行いません）
 - **monitoring-rules**: `promtool check rules` / `promtool test rules`で、Grafana Cloud用アラートルール(`monitoring/alerts/`)の構文と、発火する・しないの単体テストを実行
 - **shellcheck**: `.github/scripts/`のデプロイ・スモークテスト用シェルスクリプトの静的解析
-- **terraform-fmt** / **terraform-validate**: `terraform fmt -check -recursive`と、staging/production両環境での`terraform validate`（さくらのクラウード認証情報は一切与えず、静的な構文・スキーマ検証のみ）
+- **terraform-test**: `terraform test`(モックプロバイダ)でTerraformモジュールの単体テスト(`modules/dns_record`のゾーン名の完全一致チェックなど)
+- **terraform-fmt** / **terraform-validate**: `terraform fmt -check -recursive`と、dns/staging/production各環境での`terraform validate`（さくらのクラウード認証情報は一切与えず、静的な構文・スキーマ検証のみ）
 
 ## CD
 
@@ -220,6 +221,7 @@ TLS_CERT_DIR=/path/to/certs docker compose -f docker-compose.prod.yml up -d --bu
 - **アプリケーションメトリクス**: `GET /metrics`（`levelog_http_requests_total`・`levelog_http_request_duration_seconds`、Prometheusテキスト形式）を、アプリ本体（`PORT`、既定`8080`）とは別ポート（`METRICS_PORT`、既定`9090`）で公開しています。`docker-compose.prod.yml`はこのポートを`127.0.0.1`のみに公開し、外部からは到達できません
 - **node_exporter**: 各アプリサーバ上に`127.0.0.1:9100`でリッスンするsystemdサービスとして導入済み（`terraform/modules/app_server`）
 - **収集・転送**: 各アプリサーバ上で稼働するGrafana Alloy（`docker run --network host`のsystemdサービス）が、node_exporterとアプリの`/metrics`をスクレイプし、`api`/`web`コンテナのログをDockerソケット経由でtailして、Grafana Cloud（Prometheus互換メトリクス + Loki互換ログ）へアウトバウンドで送信します。インバウンドの穴は一切開けません
+- **DNS**: `matsu0122.com`はVercelで管理されており、`levelog.matsu0122.com`以下だけをさくらのクラウードDNSに委任します。ゾーンは`terraform/environments/dns`、各環境のAレコードは`terraform/modules/dns_record`でTerraform管理しています(`docs/tls-design.md`6節)
 - **外形監視**: さくらのクラウードの`simple_monitor`がstaging/production両環境の公開URLの`/health/live`を外部から定期チェックし、Slackへ通知します。TLS証明書の残り日数も監視し、14日を切ると通知します(自動更新が止まっている合図)
 - **アラートルール**: 5xxエラー率・p95レイテンシ・ディスク・メモリ・スクレイプ失敗・サーバーからの送信停止の7ルールを`monitoring/alerts/levelog.rules.yml`に定義し、`promtool`で単体テストしています。Grafana Cloudへは`mimirtool rules load`で登録します(`docs/monitoring-design.md`6.1節)
 - 設計の詳細（選定理由・アラートルール案・必要な環境変数一覧・残課題）は`docs/monitoring-design.md`を参照してください。**Grafana Cloudアカウントの作成・APIキー発行はまだ行っていません**（各サーバーの`/etc/levelog/monitoring.env`への設定はアプリサーバ構築後の手動作業です）。

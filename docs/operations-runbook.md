@@ -51,13 +51,23 @@ flowchart TB
 1. さくらのクラウードのアカウント・APIキー(`SAKURACLOUD_ACCESS_TOKEN` / `SAKURACLOUD_ACCESS_TOKEN_SECRET`)を発行する。
 2. デプロイ用SSH鍵ペアを生成する(公開鍵は`terraform.tfvars`または`-var`で`ssh_public_key`に渡す。秘密鍵は後述のGitHub Secretsに登録)。
 3. 管理者(自分)のグローバルIPアドレスを確認し、`admin_ssh_cidrs`に設定する準備をする(固定IPでない場合は都度更新が必要になる点に留意)。
-4. `matsu0122.com`ゾーンの現在の管理場所を確認する(`docs/tls-design.md`6節)。
+4. ~~`matsu0122.com`ゾーンの管理場所の確認~~ → Vercel(確認済み)。`levelog.matsu0122.com`以下をさくらのクラウードDNSに委任する(`docs/tls-design.md`6節、手順は2.2節)。
 5. さくらのクラウードの各種プラン名・イメージ名の最新値をコントロールパネルまたはAPIで確認する(`os_type`・DBの`plan`・`database_version`・LBの`plan`など、コード中に「要確認」と明記されている暫定値、`docs/backup-restore-design.md`2節・`terraform/modules/*/variables.tf`のコメント参照)。
 
 ### 2.2 Terraform適用の順序
 
-`terraform/environments/staging`から先に適用し、動作確認してから`production`に進むことを推奨(設計は完全に分離されているため、production側のみ先行させることも技術的には可能)。
+最初に`terraform/environments/dns`(DNSゾーン)を適用し、次に`staging`、動作確認してから`production`に進む。staging・productionはゾーンを名前で検索するため、`dns`が先に存在しないとplanの時点でエラーになる。
 
+0. **DNSゾーンと委任**(最初の1回だけ):
+   ```bash
+   cd terraform/environments/dns
+   terraform init && terraform plan && terraform apply
+   terraform output name_servers     # 例: ["ns1.gslbN.sakura.ne.jp", "ns2.gslbN.sakura.ne.jp"]
+   ```
+   Vercelのダッシュボード(matsu0122.com > DNS Records)で、名前`levelog`・種別`NS`・値に上の各ネームサーバーを、1つずつレコードとして追加する。`levelog`のA/CNAMEが既にあれば先に削除する。反映の確認:
+   ```bash
+   dig NS levelog.matsu0122.com +short   # さくらのクラウードのネームサーバーが返ること
+   ```
 1. `terraform/environments/{staging,production}`それぞれで`terraform.tfvars.example`を`terraform.tfvars`にコピーし(`.gitignore`済み)、非秘密値を埋める。秘密値(`db_admin_password`等)は`TF_VAR_*`環境変数で渡す。
 2. `terraform init`
 3. `terraform plan`で内容を確認する。**この段階で初めて実際のさくらのクラウードAPIへ到達する。** それまでのすべてのフェーズでの検証は、認証情報なしでエラー終了することの確認までに留めてきた。
@@ -86,13 +96,15 @@ Terraformの起動スクリプトが土台を作るが、秘密情報を含む�
    ls -l /opt/levelog/tls/               # fullchain.pem / privkey.pem(uid 101所有)ができていること
    sudo certbot renew --dry-run          # 自動更新が通ることの確認
    ```
-   `matsu0122.com`ゾーンがさくらのクラウードDNS以外で管理されている場合(2.1の4)は、この手順は使えない。ゾーンをさくらのクラウードDNSへ移すか、そのDNS事業者向けのcertbotプラグインに差し替える(デプロイフック以降はそのまま使える)。
+   この手順は、2.2節の0で`levelog.matsu0122.com`の委任が済んでいて、`dig NS`でさくらのクラウードのネームサーバーが返ることが前提。
 3. `/etc/levelog/monitoring.env` — `GRAFANA_CLOUD_PROMETHEUS_URL` / `_USER`、`GRAFANA_CLOUD_LOKI_URL` / `_USER`、`GRAFANA_CLOUD_API_KEY`(`docs/monitoring-design.md`4節の表を参照。Grafana Cloudアカウント自体の作成が先に必要)。
 4. Grafana Cloudへのアラートルールの登録(アカウントにつき1回、サーバー上ではなく手元で実施) — `docs/monitoring-design.md`6.1節の`mimirtool`コマンド。
 
-### 2.4 DNS設定(ユーザーの明示的な許可が必要な操作)
+### 2.4 DNS設定
 
-`docs/tls-design.md`6節の表の通り、`levelog.matsu0122.com`をロードバランサのVIPへ、`staging.levelog.matsu0122.com`をstagingアプリサーバの公開IPへ向ける。ゾーンの管理場所によって設定方法が変わる(2.1の4を参照)。
+Aレコード(`levelog.matsu0122.com` → LBのVIP、`staging.levelog.matsu0122.com` → stagingサーバー)は、各環境の`terraform apply`で自動的に作られる(`docs/tls-design.md`6節)。手作業は2.2節の0(VercelへのNSレコードの追加)だけ。
+
+production公開前の確認: `dig levelog.matsu0122.com +short`がLBのVIP(`terraform output`で確認できる)を返すこと。production環境の`apply`は、その時点で`levelog.matsu0122.com`を公開状態にする操作でもあるため、stagingでの確認を終えてから行う。
 
 ### 2.5 GitHub側の設定
 
@@ -110,7 +122,7 @@ Terraformの起動スクリプトが土台を作るが、秘密情報を含む�
 
 1. staging環境で新規登録・ログイン・ミッション作成・完了・履歴表示・ログアウトの一連の操作を実際のブラウザで確認する。
 2. `/health/ready`・`/metrics`(サーバー内部からのみ)・Grafana Cloud上でメトリクス/ログが実際に届いていることを確認する。
-3. 問題なければproduction環境も同様に確認し、DNSを切り替える。
+3. 問題なければproduction環境も同様に構築・確認する(`levelog.matsu0122.com`のAレコードはproductionの`apply`で作られる、2.4節)。
 
 ## 3. 日常のデプロイ
 

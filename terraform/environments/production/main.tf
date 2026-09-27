@@ -96,3 +96,13 @@ module "monitoring" {
   target               = var.monitor_target
   notify_slack_webhook = var.monitor_slack_webhook
 }
+
+# levelog.matsu0122.com -> the load balancer's VIP. The zone is created by
+# terraform/environments/dns (apply that first), delegated from Vercel.
+module "dns" {
+  source = "../../modules/dns_record"
+
+  zone         = var.dns_zone
+  name         = "@"
+  ipv4_address = module.load_balancer.vip_address
+}

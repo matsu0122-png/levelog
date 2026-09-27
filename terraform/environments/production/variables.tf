@@ -76,3 +76,9 @@ variable "monitor_slack_webhook" {
   default     = ""
   sensitive   = true
 }
+
+variable "dns_zone" {
+  description = "Sakura Cloud DNS zone the A record goes in (created by terraform/environments/dns)."
+  type        = string
+  default     = "levelog.matsu0122.com"
+}

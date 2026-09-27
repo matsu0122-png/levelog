@@ -11,13 +11,15 @@ terraform/
 │   ├── app_server/        # アプリサーバ(Nginx+React+Go実行)
 │   ├── database/          # PostgreSQLアプライアンス
 │   ├── load_balancer/     # ロードバランサ(production用)
-│   └── monitoring/        # 外形監視
+│   ├── monitoring/        # 外形監視
+│   └── dns_record/        # 共有ゾーンへのAレコード(tests/にterraform test)
 └── environments/
+    ├── dns/              # 独立したstate。levelog.matsu0122.comゾーン(Vercelから委任)。最初に適用
     ├── staging/          # 独立したstate。LBなし、サーバ1台
     └── production/       # 独立したstate。LB+サーバ2台
 ```
 
-`environments/{staging,production}`はそれぞれ別のTerraform rootモジュールであり、別々のstateを持つ。一方に対する`plan`/`apply`が他方に影響することは構造上あり得ない。
+`environments/{staging,production}`はそれぞれ別のTerraform rootモジュールであり、別々のstateを持つ。一方に対する`plan`/`apply`が他方に影響することは構造上あり得ない。両環境が共有するのはDNSゾーンだけで、これは3つ目のroot module `environments/dns`が所有する(各環境はゾーンを名前で検索し、自分のAレコードだけを管理する。詳細は[`../docs/tls-design.md`](../docs/tls-design.md)6節)。
 
 ## 認証情報
 
@@ -35,11 +37,19 @@ DBパスワード(`db_admin_password` / `db_app_password`)やSlack Webhook URL�
 ## 実行方法(このフェーズで許可されている範囲)
 
 ```bash
-cd environments/staging   # または environments/production
+cd environments/staging   # または environments/production / environments/dns
 terraform init
 terraform fmt -check -recursive   # ../ から実行する場合は -recursive
 terraform validate
 terraform plan
+```
+
+モジュールの単体テスト(認証情報不要、プロバイダはモック):
+
+```bash
+cd modules/dns_record
+terraform init
+terraform test
 ```
 
 `terraform apply` / `terraform destroy`は、明示的な許可を得るまで実行しない。

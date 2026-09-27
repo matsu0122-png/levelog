@@ -75,14 +75,42 @@ flowchart LR
 
 ## 6. DNS設計
 
-**DNSレコードの変更はユーザーの明示的な許可が必要な操作であるため、本フェーズでは一切実施していない。** 設計のみ記載する。
+(フェーズ20で確定・Terraform化)
 
-| レコード | 種別 | 値 | TTL(推奨) |
-| --- | --- | --- | --- |
-| `levelog.matsu0122.com` | A | ロードバランサのVIP(`module.load_balancer.vip_address`、実`apply`後に確定) | 300秒程度(切り戻し時に素早く反映できるよう短めを推奨) |
-| `staging.levelog.matsu0122.com` | A | staging環境のアプリサーバの公開IP(`module.app_server.public_ip_addresses[0]`、staging構成、フェーズ6で決定済みの通りLBなし) | 300秒程度 |
+### 6.1 ゾーンの構成: Vercelからのサブドメイン委任
 
-`matsu0122.com`ゾーン自体が現在どこで管理されているか(レジストラの既定DNS、既存のさくらのクラウードDNS、他社DNS等)を本フェーズでは確認していない。ゾーンの管理場所によって、Terraformでの管理方法(`sakuracloud_dns` / `sakuracloud_dns_record`リソースを使うか、他社DNSであれば別途手動設定が必要か)が変わるため、**実際にDNSレコードを追加する前に、現在のゾーン管理場所をユーザーに確認する必要がある**。
+`matsu0122.com`ゾーンはVercelのDNSで管理されている(フェーズ20でユーザーに確認)。このゾーン全体は動かさず、**`levelog.matsu0122.com`以下だけを、さくらのクラウードDNSに委任する**。
+
+```mermaid
+flowchart LR
+    Resolver((リゾルバ)) --> Vercel["Vercel DNS<br/>matsu0122.com<br/>NS: levelog → さくら"]
+    Vercel -->|委任| Sakura["さくらのクラウードDNS<br/>levelog.matsu0122.com"]
+    Sakura --> Prod["@ A → LB VIP"]
+    Sakura --> Stg["staging A → stagingサーバ"]
+    Sakura -.->|certbotが一時的に追加| ACME["_acme-challenge TXT"]
+```
+
+この構成を選んだ理由:
+- `matsu0122.com`の他のサイト・メールなど、Vercel側の既存の設定に一切影響しない(変更はNSレコードの追加だけ)。
+- 証明書のDNS-01チャレンジ(4節)が、さくらのクラウードのAPIキーだけで完結する。VercelのAPIでDNS-01を行う案は、Vercelのトークンがアカウント内の全プロジェクトを操作できる権限を持つため、アプリサーバに置くことを避けた。
+- VercelのDNSはNSレコードに対応しており、さくらのクラウードDNSはサブドメインのゾーン作成と委任に対応している(いずれも公式ドキュメントで確認)。
+
+### 6.2 レコード
+
+| レコード(ゾーン`levelog.matsu0122.com`内) | 種別 | 値 | TTL | 管理 |
+| --- | --- | --- | --- | --- |
+| `@`(= `levelog.matsu0122.com`) | A | ロードバランサのVIP(`module.load_balancer.vip_address`) | 300秒 | `terraform/environments/production`の`module.dns` |
+| `staging`(= `staging.levelog.matsu0122.com`) | A | stagingアプリサーバの公開IP(`module.app_server.public_ip_addresses[0]`) | 300秒 | `terraform/environments/staging`の`module.dns` |
+| `_acme-challenge`、`_acme-challenge.staging` | TXT | 証明書の発行・更新中だけ存在 | — | certbot(Terraform管理外) |
+
+Vercel側に追加するのは、`levelog`のNSレコード(さくらのクラウードのネームサーバーの数だけ)のみ。Vercel側に`levelog`のA/CNAMEレコードが既にある場合は先に削除する(同じ名前にNSとは共存できない)。
+
+### 6.3 Terraformでの管理
+
+- **ゾーン**: 新しいroot module `terraform/environments/dns`が所有する(独自のstate)。staging・productionの両方がこのゾーンにレコードを追加するため、どちらかの環境に持たせると、その環境を`destroy`したときにもう一方のレコードまで消えてしまう。ゾーンの出力`name_servers`が、Vercelに登録するNSレコードの値になる。
+- **レコード**: `terraform/modules/dns_record`を各環境から呼ぶ。ゾーンはIDではなく名前で検索する(`data "sakuracloud_dns"`)ので、環境間でstateを参照し合う必要がない。さくらのクラウードの名前検索は部分一致で最初の1件を返すため、ゾーン名が完全一致しない場合はplan時にエラーにする(`postcondition`)。この挙動は`terraform test`(モックプロバイダ)で単体テストしており、CIの`terraform-test`ジョブで実行する。
+- ゾーンのリソースにはレコードを1つも書かない。プロバイダの`record`属性はOptional+Computedなので、書かなければTerraformは`sakuracloud_dns_record`やcertbotが追加したレコードを自分のものとして扱わず、削除もしない。
+- **適用順**: `dns` → VercelにNSレコードを追加 → `staging` → `production`(`docs/operations-runbook.md`2.2節)。Aレコードの値はそれぞれの環境の`apply`で自動的に決まるので、IPを手で転記する作業はない。
 
 ## 7. 片系停止試験(試験計画、未実施)
 
@@ -121,8 +149,8 @@ flowchart LR
 
 ## 9. 未確定・今後の判断が必要な事項
 
-- `matsu0122.com`ゾーンの現在の管理場所の確認(DNS変更前に必須)
-- ~~DNS-01チャレンジ用のcertbotプラグインの選定~~ → フェーズ19で`certbot-dns-sakuracloud`に確定(4節)。ただし`matsu0122.com`ゾーンがさくらのクラウードDNSで管理されていることが前提
+- ~~`matsu0122.com`ゾーンの現在の管理場所の確認~~ → Vercel。`levelog`以下をさくらのクラウードDNSに委任する(フェーズ20、6節)
+- ~~DNS-01チャレンジ用のcertbotプラグインの選定~~ → フェーズ19で`certbot-dns-sakuracloud`に確定(4節)。`levelog.matsu0122.com`をさくらのクラウードDNSに委任することで満たす(6節)
 - ~~証明書更新の自動化~~ → フェーズ19で実装(4節)
 - ロードバランサの`assigned_ip_addresses`の実際の並び順・予約アドレスの確認(初回`apply`後)
 - 片系停止試験の実施(フェーズ17)

@@ -7,3 +7,8 @@ output "database_id" {
   description = "ID of the staging database appliance."
   value       = module.database.database_id
 }
+
+output "dns_fqdn" {
+  description = "Hostname this environment's A record answers for."
+  value       = module.dns.fqdn
+}

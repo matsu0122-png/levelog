@@ -160,7 +160,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [staging, production]
+        environment: [dns, staging, production]
     defaults:
       run:
         working-directory: terraform/environments/${{ matrix.environment }}
@@ -176,6 +176,23 @@ jobs:
       # outside an explicit, manually-approved session).
       - run: terraform init -input=false
       - run: terraform validate
+
+  terraform-test:
+    name: Terraform test (modules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      # `terraform test` with mock providers: exercises module logic (e.g.
+      # modules/dns_record's exact-zone-name check) with no credentials and
+      # no cloud API calls, same rule as terraform-validate above.
+      - name: modules/dns_record
+        working-directory: terraform/modules/dns_record
+        run: |
+          terraform init -input=false
+          terraform test
 
   monitoring-rules:
     name: Alert rules (promtool check / unit test)
