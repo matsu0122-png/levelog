@@ -1,0 +1,178 @@
+# Unit tests for levelog.rules.yml. Run: promtool test rules monitoring/alerts/levelog.rules.test.yml
+rule_files:
+  - levelog.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 10% errors at a healthy request rate -> fires after `for: 5m`.
+  - interval: 1m
+    input_series:
+      - series: 'levelog_http_requests_total{environment="production",host="app-1",route="/api/missions",method="GET",status="200"}'
+        values: '0+54x20'
+      - series: 'levelog_http_requests_total{environment="production",host="app-1",route="/api/missions",method="GET",status="500"}'
+        values: '0+6x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: LevelogHigh5xxRate
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: LevelogHigh5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: production
+            exp_annotations:
+              summary: "production: 5xx error rate is 10%"
+              description: "More than 5% of API requests returned 5xx for 5 minutes. Check container logs in Grafana (Loki, {container=\"levelog-api-1\"}) and docs/operations-runbook.md section 5."
+
+  # Same 50% error ratio but almost no traffic -> the rate floor keeps it quiet.
+  - interval: 1m
+    input_series:
+      - series: 'levelog_http_requests_total{environment="production",host="app-1",route="/api/me",method="GET",status="200"}'
+        values: '0+1x20'
+      - series: 'levelog_http_requests_total{environment="production",host="app-1",route="/api/me",method="GET",status="500"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LevelogHigh5xxRate
+        exp_alerts: []
+
+  # Healthy errors on one host are summed with the other before the ratio.
+  - interval: 1m
+    input_series:
+      - series: 'levelog_http_requests_total{environment="production",host="app-1",route="/api/missions",method="GET",status="500"}'
+        values: '0+3x20'
+      - series: 'levelog_http_requests_total{environment="production",host="app-1",route="/api/missions",method="GET",status="200"}'
+        values: '0+27x20'
+      - series: 'levelog_http_requests_total{environment="production",host="app-2",route="/api/missions",method="GET",status="200"}'
+        values: '0+70x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LevelogHigh5xxRate
+        exp_alerts: []
+
+  # Every request lands in the 2.5s bucket -> p95 > 1s.
+  - interval: 1m
+    input_series:
+      - series: 'levelog_http_request_duration_seconds_bucket{environment="staging",host="app-1",route="/api/missions",method="GET",le="1"}'
+        values: '0+0x20'
+      - series: 'levelog_http_request_duration_seconds_bucket{environment="staging",host="app-1",route="/api/missions",method="GET",le="2.5"}'
+        values: '0+60x20'
+      - series: 'levelog_http_request_duration_seconds_bucket{environment="staging",host="app-1",route="/api/missions",method="GET",le="+Inf"}'
+        values: '0+60x20'
+      - series: 'levelog_http_request_duration_seconds_count{environment="staging",host="app-1",route="/api/missions",method="GET"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: LevelogHighLatencyP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: staging
+            exp_annotations:
+              summary: "staging: p95 API latency is 2.425s"
+              description: "95th percentile API latency has been above 1s for 5 minutes. Phase 17 found DB connection pool exhaustion shows up exactly like this (docs/load-test-results.md section 4)."
+
+  # Disk at 10% free on / fires; tmpfs at 1% free is ignored.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="levelog_node",environment="production",host="app-2",mountpoint="/",fstype="ext4"}'
+        values: '10x20'
+      - series: 'node_filesystem_size_bytes{job="levelog_node",environment="production",host="app-2",mountpoint="/",fstype="ext4"}'
+        values: '100x20'
+      - series: 'node_filesystem_avail_bytes{job="levelog_node",environment="production",host="app-2",mountpoint="/run",fstype="tmpfs"}'
+        values: '1x20'
+      - series: 'node_filesystem_size_bytes{job="levelog_node",environment="production",host="app-2",mountpoint="/run",fstype="tmpfs"}'
+        values: '100x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LevelogDiskSpaceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: levelog_node
+              environment: production
+              host: app-2
+              mountpoint: /
+              fstype: ext4
+            exp_annotations:
+              summary: "production/app-2: / has 10% free"
+              description: "Less than 15% disk space left. Old images are the usual culprit: `docker image prune -a` (docs/operations-runbook.md section 7)."
+
+  - interval: 1m
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{job="levelog_node",environment="staging",host="app-1"}'
+        values: '5x20'
+      - series: 'node_memory_MemTotal_bytes{job="levelog_node",environment="staging",host="app-1"}'
+        values: '100x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LevelogMemoryLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: levelog_node
+              environment: staging
+              host: app-1
+            exp_annotations:
+              summary: "staging/app-1: 5% memory available"
+              description: "Less than 10% of memory available for 10 minutes."
+
+  # app-2's api goes down (up=0) while its node_exporter keeps reporting.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="levelog_api",environment="production",host="app-2",instance="127.0.0.1:9090"}'
+        values: '1 1 0x15'
+      - series: 'up{job="levelog_node",environment="production",host="app-1",instance="127.0.0.1:9100"}'
+        values: '1x17'
+      - series: 'up{job="levelog_node",environment="production",host="app-2",instance="127.0.0.1:9100"}'
+        values: '1x17'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LevelogScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: levelog_api
+              environment: production
+              host: app-2
+              instance: 127.0.0.1:9090
+            exp_annotations:
+              summary: "production/app-2: levelog_api is not being scraped"
+              description: "Grafana Alloy on this server can reach Grafana Cloud but not levelog_api."
+      - eval_time: 10m
+        alertname: LevelogProductionServersNotReporting
+        exp_alerts: []
+
+  # app-2 stops sending anything at all (series ends) -> dead man's switch.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="levelog_node",environment="production",host="app-1",instance="127.0.0.1:9100"}'
+        values: '1x20'
+      - series: 'up{job="levelog_node",environment="production",host="app-2",instance="127.0.0.1:9100"}'
+        values: '1 1'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LevelogProductionServersNotReporting
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: production
+            exp_annotations:
+              summary: "production: only 1 of 2 app servers are sending metrics"
+              description: "Check `systemctl status levelog-alloy` on each production app server, and /etc/levelog/monitoring.env."
+
+  # Staging sends nothing at all (never set up, or Alloy dead) -> still fires.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LevelogStagingServersNotReporting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: staging
+            exp_annotations:
+              summary: "staging: the app server is not sending metrics"
+              description: "Check `systemctl status levelog-alloy` on the staging app server, and /etc/levelog/monitoring.env."

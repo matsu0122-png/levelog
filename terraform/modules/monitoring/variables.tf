@@ -38,3 +38,15 @@ variable "notify_slack_webhook" {
   default     = ""
   sensitive   = true
 }
+
+variable "cert_remaining_days" {
+  description = "Alert when the served TLS certificate has fewer than this many days left. Keep it below 30 (when certbot renews) so it only fires if renewal is broken."
+  type        = number
+  default     = 14
+}
+
+variable "cert_check_delay_loop_seconds" {
+  description = "Seconds between certificate expiry checks. Expiry moves in days, so this does not need the uptime check's frequency."
+  type        = number
+  default     = 3600
+}

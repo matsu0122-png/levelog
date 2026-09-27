@@ -1,0 +1,115 @@
+# Grafana Cloud alert rules for Levelog (docs/monitoring-design.md section 6).
+#
+# Prometheus rule format, so they run in Grafana Cloud's Mimir ruler
+# ("data source-managed" rules) and are loaded with mimirtool rather than
+# clicked together in the UI — see docs/monitoring-design.md section 6.1
+# for the load command and the Slack contact point. Unit tests live next to
+# this file (levelog.rules.test.yml) and run in CI via `promtool test rules`.
+#
+# Labels available on every series (set by Grafana Alloy on each app
+# server, terraform/modules/app_server/templates/startup.sh.tftpl):
+#   environment  staging | production
+#   host         app server hostname (each server scrapes 127.0.0.1, so
+#                `instance` alone cannot tell servers apart)
+#   job          levelog_api (the Go API's /metrics) | levelog_node (node_exporter)
+groups:
+  - name: levelog-app
+    rules:
+      - alert: LevelogHigh5xxRate
+        # Per environment, not per host: the load balancer spreads traffic,
+        # so users feel the combined rate. The request-rate floor stops a
+        # single 500 at 3am (1 of 2 requests = 50%) from paging anyone.
+        expr: |
+          (
+            sum by (environment) (rate(levelog_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum by (environment) (rate(levelog_http_requests_total[5m]))
+          ) > 0.05
+          and
+          sum by (environment) (rate(levelog_http_requests_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.environment }}: 5xx error rate is {{ $value | humanizePercentage }}"
+          description: "More than 5% of API requests returned 5xx for 5 minutes. Check container logs in Grafana (Loki, {container=\"levelog-api-1\"}) and docs/operations-runbook.md section 5."
+
+      - alert: LevelogHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (environment, le) (rate(levelog_http_request_duration_seconds_bucket[5m]))
+          ) > 1
+          and
+          sum by (environment) (rate(levelog_http_request_duration_seconds_count[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.environment }}: p95 API latency is {{ $value | humanizeDuration }}"
+          description: "95th percentile API latency has been above 1s for 5 minutes. Phase 17 found DB connection pool exhaustion shows up exactly like this (docs/load-test-results.md section 4)."
+
+  - name: levelog-host
+    rules:
+      - alert: LevelogDiskSpaceLow
+        expr: |
+          node_filesystem_avail_bytes{job="levelog_node", fstype!~"tmpfs|overlay|squashfs"}
+            / node_filesystem_size_bytes{job="levelog_node", fstype!~"tmpfs|overlay|squashfs"}
+          < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.environment }}/{{ $labels.host }}: {{ $labels.mountpoint }} has {{ $value | humanizePercentage }} free"
+          description: "Less than 15% disk space left. Old images are the usual culprit: `docker image prune -a` (docs/operations-runbook.md section 7)."
+
+      - alert: LevelogMemoryLow
+        expr: |
+          node_memory_MemAvailable_bytes{job="levelog_node"}
+            / node_memory_MemTotal_bytes{job="levelog_node"}
+          < 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.environment }}/{{ $labels.host }}: {{ $value | humanizePercentage }} memory available"
+          description: "Less than 10% of memory available for 10 minutes."
+
+  - name: levelog-agent
+    rules:
+      # Alloy is running but a scrape target isn't answering (node_exporter
+      # stopped, or the api container is down so :9090 is closed).
+      - alert: LevelogScrapeTargetDown
+        expr: up{job=~"levelog_api|levelog_node"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.environment }}/{{ $labels.host }}: {{ $labels.job }} is not being scraped"
+          description: "Grafana Alloy on this server can reach Grafana Cloud but not {{ $labels.job }}."
+
+      # Dead man's switch: fewer servers are reporting at all than exist
+      # (Alloy stopped, the server is gone, or monitoring.env credentials
+      # are wrong). `up == 0` above can't catch this — a silent server sends
+      # no `up` series at all. `or vector(0)` makes "nobody reports" count
+      # as 0 instead of an empty result that would never fire. Expected
+      # counts mirror server_count in terraform/environments/*/main.tf —
+      # update them together.
+      - alert: LevelogProductionServersNotReporting
+        expr: (count(up{job="levelog_node", environment="production"}) or vector(0)) < 2
+        for: 5m
+        labels:
+          severity: critical
+          environment: production
+        annotations:
+          summary: "production: only {{ $value }} of 2 app servers are sending metrics"
+          description: "Check `systemctl status levelog-alloy` on each production app server, and /etc/levelog/monitoring.env."
+
+      - alert: LevelogStagingServersNotReporting
+        expr: (count(up{job="levelog_node", environment="staging"}) or vector(0)) < 1
+        for: 5m
+        labels:
+          severity: warning
+          environment: staging
+        annotations:
+          summary: "staging: the app server is not sending metrics"
+          description: "Check `systemctl status levelog-alloy` on the staging app server, and /etc/levelog/monitoring.env."

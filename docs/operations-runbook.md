@@ -70,8 +70,25 @@ flowchart TB
 Terraformの起動スクリプトが土台を作るが、秘密情報を含む以下のファイルは意図的に自動化していない(`docs/deployment-design.md`5節・`docs/monitoring-design.md`4節 — CI/Terraformの実行権限が本番の秘密情報に直結しないようにするための設計判断)。SSHで各サーバーへ接続し、手動で作成する。
 
 1. `/opt/levelog/.env` — `DATABASE_URL` / `FRONTEND_ORIGIN` / `COOKIE_DOMAIN`(空のままでよい、`docs/staging-environment.md`4節) / `COOKIE_SECURE=true`等。
-2. TLS証明書(`/opt/levelog/tls/fullchain.pem` / `privkey.pem`) — DNS-01チャレンジで取得(`docs/tls-design.md`4節、certbotプラグインは未選定、要確認)。
+2. TLS証明書 — さくらのクラウードDNSのDNS-01チャレンジで**初回のみ**手動発行する(`docs/tls-design.md`4節)。以降の更新は`certbot.timer`とデプロイフックが自動で行う。
+   ```bash
+   # さくらのクラウードのAPIキー(DNSの操作権限のみを持つものを推奨)
+   sudo install -m 0600 /dev/null /etc/letsencrypt/sakuracloud.ini
+   sudoedit /etc/letsencrypt/sakuracloud.ini
+   #   dns_sakuracloud_api_token  = <アクセストークン>
+   #   dns_sakuracloud_api_secret = <アクセストークンシークレット>
+   sudo certbot certonly --non-interactive --agree-tos -m <連絡先メール> \
+     --authenticator dns-sakuracloud \
+     --dns-sakuracloud-credentials /etc/letsencrypt/sakuracloud.ini \
+     --dns-sakuracloud-propagation-seconds 120 \
+     --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/levelog.sh \
+     -d levelog.matsu0122.com          # stagingは staging.levelog.matsu0122.com
+   ls -l /opt/levelog/tls/               # fullchain.pem / privkey.pem(uid 101所有)ができていること
+   sudo certbot renew --dry-run          # 自動更新が通ることの確認
+   ```
+   `matsu0122.com`ゾーンがさくらのクラウードDNS以外で管理されている場合(2.1の4)は、この手順は使えない。ゾーンをさくらのクラウードDNSへ移すか、そのDNS事業者向けのcertbotプラグインに差し替える(デプロイフック以降はそのまま使える)。
 3. `/etc/levelog/monitoring.env` — `GRAFANA_CLOUD_PROMETHEUS_URL` / `_USER`、`GRAFANA_CLOUD_LOKI_URL` / `_USER`、`GRAFANA_CLOUD_API_KEY`(`docs/monitoring-design.md`4節の表を参照。Grafana Cloudアカウント自体の作成が先に必要)。
+4. Grafana Cloudへのアラートルールの登録(アカウントにつき1回、サーバー上ではなく手元で実施) — `docs/monitoring-design.md`6.1節の`mimirtool`コマンド。
 
 ### 2.4 DNS設定(ユーザーの明示的な許可が必要な操作)
 
@@ -100,7 +117,7 @@ Terraformの起動スクリプトが土台を作るが、秘密情報を含む�
 - `main`へのマージ → CI成功 → stagingへ自動デプロイ。stagingで動作確認。
 - 問題なければ、GitHub Actionsの`workflow_dispatch`で`cd.yml`を手動実行し、`environment: production`を選択してデプロイ(`image_tag`は省略時は最新のコミットSHA)。
 - productionは2台をmax-parallel: 1で順番にデプロイ(ローリング、`docs/deployment-design.md`1節)。
-- **デプロイ後は`/health/ready`が通ることに加えて、実際にログイン等の主要フローを手動で一度確認することを推奨する。** フェーズ17の障害試験で、ヘルスチェックだけでは検知できない種類の退行があることを実際に確認済み(`docs/load-test-results.md`3節)。将来的に自動スモークテストを追加することが望ましい(8節)。
+- **デプロイ後の自動スモークテスト**: `/health/ready`の合格後、`.github/scripts/deploy-host.sh`が各サーバー上で`.github/scripts/smoke-test.sh`を実行する(HTTP→HTTPSリダイレクト、SPA配信、セキュリティヘッダー、未認証時の401、存在しないユーザーでのログインが401になること、証明書の残り日数)。データは一切書き込まないのでproductionでも安全。失敗するとジョブが失敗し、productionでは2台目へのデプロイに進まない。その場合は4節の手順でロールバックする。フェーズ17で確認した「ヘルスチェックは通るがログインが500を返す」退行を、このスモークテストが検知することをローカルで確認済み(`docs/load-test-results.md`3節)。
 
 ## 4. ロールバック
 
@@ -129,7 +146,7 @@ Terraformの起動スクリプトが土台を作るが、秘密情報を含む�
 
 ## 6. 監視・アラートへの対応
 
-`docs/monitoring-design.md`6節に記載のアラート案(5xxエラー率・レイテンシ・ディスク・メモリ・エージェント停止)を参照。**Grafana Cloud側のアラートルール自体はまだ実装されていない**(2.3節でアカウント作成後、`docs/monitoring-design.md`6節の条件を元に設定する)。さくらのクラウードの外形監視(`simple_monitor`)はTerraformで既に定義済みで、apply後すぐにSlack通知が機能する。
+アラートルールは`monitoring/alerts/levelog.rules.yml`にコードとして定義済み(5xxエラー率・p95レイテンシ・ディスク・メモリ・スクレイプ失敗・サーバーからの送信停止)。CIの`promtool test rules`で単体テストされている。Grafana Cloudへの登録は2.3節の4(`docs/monitoring-design.md`6.1節)。各アラートの説明文に、最初に確認すべき場所を書いてある。さくらのクラウードの外形監視(`simple_monitor`)は、死活監視(`/health/live`)と証明書の残り日数(14日未満で通知)の2つがTerraformで定義済みで、apply後すぐにSlack通知が機能する。証明書の通知が来た場合は、自動更新が止まっている(`systemctl status certbot.timer`、`journalctl -u certbot`)。
 
 ## 7. 定期メンテナンス
 
@@ -146,9 +163,7 @@ Terraformの起動スクリプトが土台を作るが、秘密情報を含む�
 | --- | --- | --- |
 | Terraform stateがローカルbackend | リモートbackendへの移行が未実施。担当者のローカル環境が失われるとstateも失われる | フェーズ7から継続 |
 | DB冗長構成(フェイルオーバー) | レプリカの実際の作成・紐付けは手動操作が必要、未実施 | `docs/database-design.md`3節 |
-| TLS証明書の自動更新 | certbotのDNSプラグイン未選定、更新の自動化未実装。現状は手動更新が必要 | `docs/tls-design.md`4節 |
-| デプロイ後の自動スモークテスト | ヘルスチェックだけでは検知できない退行がある(3節) | `docs/load-test-results.md`3節 |
-| Grafana Cloudのアラートルール | 設計のみ、未実装(アカウント未作成のため) | `docs/monitoring-design.md`6節 |
+| Grafana Cloudのアラートルール | コード化・単体テスト済みだが、Grafana Cloudへの登録はアカウント作成後(2.3節) | `docs/monitoring-design.md`6節 |
 | レート制限が単一プロセス内でのみ有効 | production2台構成で、実効上限が単純に2倍になる程度の粗さ | `docs/security-review.md`1節 |
 | セッションの固定30日・スライディング延長なし | 意図的な現状維持、将来見直す可能性あり | `docs/security-review.md`1節 |
 | アプリサーバ内部NICの静的IP割り当て | 実環境検証待ち | フェーズ8から継続 |

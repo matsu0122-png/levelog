@@ -1260,6 +1260,36 @@ READMEおよびコード確認の結果、以下がMVPとして実装済み。
 
 なし。ロードマップの全18フェーズが完了した。次の一歩は、`docs/go-live-readiness.md`2節のチェックリストに沿って、ユーザー自身が実際のさくらのクラウードリソースを構築することである。
 
+## フェーズ19:公開前の残課題のうちコードで解消できるもの(完了)
+
+フェーズ18の`docs/go-live-readiness.md`・`docs/operations-runbook.md`8節に残っていた課題のうち、実在の認証情報・費用・ドメイン操作を伴わずに進められる3件を実装した。
+
+### 実装内容
+
+1. **デプロイ後の自動スモークテスト**(`docs/load-test-results.md`3節の課題): `.github/scripts/smoke-test.sh`を新規作成し、`deploy-host.sh`が`/health/ready`合格後に各サーバー上で実行する。データを書き込まない確認だけで構成したので、productionでも安全に実行できる。
+2. **TLS証明書の自動更新**(`docs/tls-design.md`4節の課題): certbot公式の`certbot-dns-sakuracloud`(Ubuntu 24.04の`python3-certbot-dns-sakuracloud`)に確定。`certbot.timer`の有効化と、証明書を`/opt/levelog/tls/`へ差し替えてNginxをリロードするデプロイフックを、起動スクリプトに追加した。外形監視に証明書の残り日数チェック(`sslcertificate`、14日未満で通知)も追加した。
+3. **Grafana Cloudのアラートルールのコード化**(`docs/monitoring-design.md`6節の課題): `monitoring/alerts/levelog.rules.yml`(7ルール)と`promtool`の単体テストを追加し、CIに`monitoring-rules`ジョブを追加した。
+4. **調査中に見つけた既存の不具合の修正**: Alloyの設定に、サーバーを区別するラベルがなかった(全サーバーが`127.0.0.1`をスクレイプするため`instance`が同じになり、production 2台の系列が衝突する)。`host = constants.hostname`をメトリクス・ログの両方に追加した。
+5. CIに`shellcheck`ジョブを追加した(これまでローカルでのみ実行していた)。
+
+### 検証結果
+
+- スモークテスト: 本番構成(`docker-compose.prod.yml`、自己署名証明書)をローカルで起動し、全12項目が合格することを確認した。さらにフェーズ17と同じ「ログインが常に500を返す」退行を仕込んだビルドでは、`/health/ready`が200のままでもスモークテストが失敗(終了コード1)することを確認した。検証中に、接続失敗時にステータスが`000000`と表示される不具合を見つけて修正した。
+- 証明書更新フック: 同じ環境で、別の証明書を`RENEWED_LINEAGE`としてフックを実行し、コンテナを再起動せずに配信される証明書が切り替わること、鍵がuid 101・0400で置かれてもNginxが読めることを確認した。
+- Alloy: 修正後の設定を`grafana/alloy:v1.19.2`で実際に起動し、全7コンポーネントがhealthyであることを確認した。
+- アラートルール: `promtool check rules`・`promtool test rules`(9テストケース、すべて合格)・`mimirtool rules check`が成功。閾値を変えた版・`or vector(0)`を外した版でテストが失敗することも確認した。
+- Terraform: `terraform fmt -check`が成功。`sacloud/sakuracloud`プロバイダ(v2.36.1)をソースからビルドし、変更した`monitoring`・`app_server`モジュールで`terraform validate`が成功した(この環境からはTerraformレジストリに接続できないため)。`remaining_days = 0`で範囲外エラーになることから、スキーマが実際に検査されていることも確認した。起動スクリプトのテンプレートを`templatefile()`でレンダリングし、`bash -n`・`shellcheck`で確認した(警告は既存のnode_exporter部分の1件のみ)。
+- `actionlint`・`shellcheck`(デプロイ・スモークテスト・証明書フックのスクリプト)が成功。バックエンドの`go test ./...`が成功。
+- 検証環境ではIPv6が無効なため、Nginxの`listen [::]`を検証用のコピーでだけ外して起動した(本番のUbuntuでは問題にならない。リポジトリのファイルは変更していない)。
+
+### セキュリティ上の確認
+
+さくらのクラウードのAPIキー(証明書発行用)は`/etc/letsencrypt/sakuracloud.ini`(0600)に手動で置く方針とし、起動スクリプト・Terraform・CIのいずれにも持たせない。スモークテストはデータを書き込まず、ログインの確認には予約済みTLD `.invalid`のアドレスを使うので、実在のアカウントに当たることはない。Grafana CloudのAPIキーとSlackのWebhook URLはリポジトリに置かない(`mimirtool`の引数とGrafana CloudのUIで直接扱う)。`terraform apply`・DNS変更・クラウドリソースの作成は、このフェーズでも実施していない。
+
+### 残っている課題
+
+`docs/go-live-readiness.md`2節の手動チェックリストは変わらない(アカウント・APIキー・SSH鍵・`terraform apply`・秘密情報の投入・DNS・GitHub Secrets)。これに加えて、証明書の初回発行(`docs/operations-runbook.md`2.3節)とアラートルールのGrafana Cloudへの登録(`docs/monitoring-design.md`6.1節)が、アカウント作成後に1回ずつ必要。証明書の自動発行は、`matsu0122.com`ゾーンがさくらのクラウードDNSで管理されていることが前提。
+
 ---
 
 ここでロードマップの全フェーズが完了しました。実際の公開作業は`docs/go-live-readiness.md`と`docs/operations-runbook.md`を参照してください。

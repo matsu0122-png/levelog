@@ -37,6 +37,7 @@ levelog/
 │   │   └── levelup/               # レベル計算の共通ロジック（テスト済み）
 │   ├── migrations/                # SQLマイグレーション（embedで同梱）
 │   └── Dockerfile
+├── monitoring/alerts/             # Grafana Cloud用アラートルール + promtool単体テスト
 └── frontend/
     ├── src/
     │   ├── api/                   # APIクライアント・型定義
@@ -184,7 +185,7 @@ npm run build      # 本番ビルド確認
 
 - `backend/Dockerfile`: マルチステージビルド、`CGO_ENABLED=0`、非rootユーザー実行、`HEALTHCHECK`付き（`/health/live`）
 - `frontend/Dockerfile`: `vite build`の成果物を`nginxinc/nginx-unprivileged`（非root）で配信するマルチステージビルド。`nginx.conf`が`/api/`・`/health/`を同一オリジンでバックエンドへプロキシするため、ブラウザは常に単一オリジンとのみ通信し、本番のクロスオリジンCORS/Cookie設定を回避できます
-- `frontend/nginx.conf`: ポート8080（平文HTTP、`/health/`・`/healthz`以外はHTTPSへ301リダイレクト）とポート8443（TLS終端。証明書は`/etc/nginx/tls/`から読み込み）の2構成。TLSはロードバランサではなく各アプリサーバのNginxで終端します（詳細は`docs/tls-design.md`）
+- `frontend/nginx.conf`: ポート8080（平文HTTP、`/health/`・`/healthz`以外はHTTPSへ301リダイレクト）とポート8443（TLS終端。証明書は`/etc/nginx/tls/`から読み込み）の2構成。TLSはロードバランサではなく各アプリサーバのNginxで終端します（詳細は`docs/tls-design.md`）。証明書はLet's EncryptのDNS-01（certbot公式のさくらのクラウードDNSプラグイン）で初回だけ手動発行し、以降は`certbot.timer`とデプロイフックが更新からNginxのリロードまで自動で行います（`docs/tls-design.md`4節）
 - `docker-compose.prod.yml`は`db`を含みません。本番DBは別途管理されるアプライアンス（フェーズ9で構築済み）を`DATABASE_URL`経由で指定してください。`web`サービスは`TLS_CERT_DIR`（`fullchain.pem`・`privkey.pem`を含むディレクトリ）の指定が必須です
 
 ```bash
@@ -202,11 +203,15 @@ TLS_CERT_DIR=/path/to/certs docker compose -f docker-compose.prod.yml up -d --bu
 - **backend-integration**: Postgresサービスコンテナ（`postgres:16-alpine`）を使い、`go test ./internal/handler/... -v -race`で実DBに対する統合テスト（認証・ミッション・XP二重付与防止・認可）を実行
 - **frontend**: `tsc -b`（型チェック）・`npm run lint`（oxlint）・`npm run test -- --run`（Vitest）・`npm run build`
 - **docker-build**: `backend/Dockerfile` / `frontend/Dockerfile`のビルドが壊れていないことを確認（イメージのpush・レジストリ認証は行いません）
+- **monitoring-rules**: `promtool check rules` / `promtool test rules`で、Grafana Cloud用アラートルール(`monitoring/alerts/`)の構文と、発火する・しないの単体テストを実行
+- **shellcheck**: `.github/scripts/`のデプロイ・スモークテスト用シェルスクリプトの静的解析
 - **terraform-fmt** / **terraform-validate**: `terraform fmt -check -recursive`と、staging/production両環境での`terraform validate`（さくらのクラウード認証情報は一切与えず、静的な構文・スキーマ検証のみ）
 
 ## CD
 
 `.github/workflows/cd.yml`が、`main`でのCI成功をトリガーにstaging環境へ自動デプロイします（イメージをGHCRへビルド・push → SSHでアプリサーバへ`docker compose pull && up -d`）。production環境へのデプロイは常に`workflow_dispatch`による手動実行のみで、GitHub Environmentの`production`にRequired reviewersを設定して人の承認を必須にすることを想定しています。ロールバックは`workflow_dispatch`の`image_tag`入力に過去のコミットSHAを指定して再実行します。詳細な設計・必要なSecrets一覧は`docs/deployment-design.md`を参照してください。
+
+各サーバーへのデプロイ後には`.github/scripts/smoke-test.sh`が自動で実行されます(HTTPSリダイレクト・SPA配信・セキュリティヘッダー・未認証時の401・ログインAPIの応答・証明書の残り日数を確認。データは書き込みません)。`/health/ready`はDB疎通しか見ないため、ヘルスチェックは通るのにログインが壊れている、といった退行をここで止めます。
 
 **注意**: アプリサーバ自体がまだ`terraform apply`されておらず実在しないため、このワークフローはまだ実行できません（デプロイ先のSecrets未設定）。
 
@@ -215,7 +220,8 @@ TLS_CERT_DIR=/path/to/certs docker compose -f docker-compose.prod.yml up -d --bu
 - **アプリケーションメトリクス**: `GET /metrics`（`levelog_http_requests_total`・`levelog_http_request_duration_seconds`、Prometheusテキスト形式）を、アプリ本体（`PORT`、既定`8080`）とは別ポート（`METRICS_PORT`、既定`9090`）で公開しています。`docker-compose.prod.yml`はこのポートを`127.0.0.1`のみに公開し、外部からは到達できません
 - **node_exporter**: 各アプリサーバ上に`127.0.0.1:9100`でリッスンするsystemdサービスとして導入済み（`terraform/modules/app_server`）
 - **収集・転送**: 各アプリサーバ上で稼働するGrafana Alloy（`docker run --network host`のsystemdサービス）が、node_exporterとアプリの`/metrics`をスクレイプし、`api`/`web`コンテナのログをDockerソケット経由でtailして、Grafana Cloud（Prometheus互換メトリクス + Loki互換ログ）へアウトバウンドで送信します。インバウンドの穴は一切開けません
-- **外形監視**: さくらのクラウードの`simple_monitor`がstaging/production両環境の公開URLの`/health/live`を外部から定期チェックし、Slackへ通知します
+- **外形監視**: さくらのクラウードの`simple_monitor`がstaging/production両環境の公開URLの`/health/live`を外部から定期チェックし、Slackへ通知します。TLS証明書の残り日数も監視し、14日を切ると通知します(自動更新が止まっている合図)
+- **アラートルール**: 5xxエラー率・p95レイテンシ・ディスク・メモリ・スクレイプ失敗・サーバーからの送信停止の7ルールを`monitoring/alerts/levelog.rules.yml`に定義し、`promtool`で単体テストしています。Grafana Cloudへは`mimirtool rules load`で登録します(`docs/monitoring-design.md`6.1節)
 - 設計の詳細（選定理由・アラートルール案・必要な環境変数一覧・残課題）は`docs/monitoring-design.md`を参照してください。**Grafana Cloudアカウントの作成・APIキー発行はまだ行っていません**（各サーバーの`/etc/levelog/monitoring.env`への設定はアプリサーバ構築後の手動作業です）。
 
 ## バックアップと復元
@@ -241,6 +247,6 @@ TLS_CERT_DIR=/path/to/certs docker compose -f docker-compose.prod.yml up -d --bu
 
 ## 運用手順書と公開判定
 
-18フェーズにわたる本番対応が完了しました。実際の運用手順は`docs/operations-runbook.md`(初回構築手順・日常デプロイ・障害対応・定期メンテナンス)、公開可否の判定は`docs/go-live-readiness.md`(判定結果・公開前必須チェックリスト)を参照してください。
+18フェーズにわたる本番対応が完了しました(フェーズ19で、公開前の残課題のうちコードで解消できるもの — デプロイ後スモークテスト・証明書の自動更新・アラートルールのコード化 — も実装済み)。実際の運用手順は`docs/operations-runbook.md`(初回構築手順・日常デプロイ・障害対応・定期メンテナンス)、公開可否の判定は`docs/go-live-readiness.md`(判定結果・公開前必須チェックリスト)を参照してください。
 
 **判定結果: 条件付きGO** — コード・インフラ設計は本番公開の準備が整っていますが、実際の公開にはさくらのクラウードアカウントの用意・DNS設定・各種秘密情報の投入など、実在の認証情報を伴う一連の手動作業が必要です(詳細は`docs/go-live-readiness.md`2節)。

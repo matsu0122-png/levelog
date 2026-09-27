@@ -28,8 +28,8 @@ ssh-keyscan -H "$DEPLOY_HOST" >"$known_hosts" 2>/dev/null
 ssh_opts=(-i "$key_path" -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=10)
 target="$DEPLOY_USER@$DEPLOY_HOST"
 
-echo "==> Syncing docker-compose.prod.yml to $target:/opt/levelog/"
-scp "${ssh_opts[@]}" docker-compose.prod.yml "$target:/opt/levelog/docker-compose.prod.yml"
+echo "==> Syncing docker-compose.prod.yml and smoke-test.sh to $target:/opt/levelog/"
+scp "${ssh_opts[@]}" docker-compose.prod.yml .github/scripts/smoke-test.sh "$target:/opt/levelog/"
 
 echo "==> Deploying image tag $IMAGE_TAG on $DEPLOY_HOST"
 # Unquoted heredoc: $GH_TOKEN / $GH_ACTOR / $IMAGE_TAG are expanded here,
@@ -47,5 +47,14 @@ trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
 export IMAGE_TAG="$IMAGE_TAG"
 /opt/levelog/deploy.sh
 REMOTE
+
+# /health/ready (checked inside deploy.sh) only proves DB connectivity; a
+# build that breaks a real request path still passes it (phase 17 rollback
+# drill, docs/load-test-results.md section 3). A non-zero exit here fails
+# this job, which also stops the production matrix before it reaches the
+# next server — roll back by re-running CD with image_tag set to the
+# previous SHA (docs/operations-runbook.md section 4).
+echo "==> Running smoke test on $DEPLOY_HOST"
+ssh "${ssh_opts[@]}" "$target" bash /opt/levelog/smoke-test.sh
 
 echo "==> Deploy to $DEPLOY_HOST complete"
