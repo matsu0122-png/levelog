@@ -47,7 +47,7 @@ terraform plan
 モジュールの単体テスト(認証情報不要、プロバイダはモック):
 
 ```bash
-cd modules/dns_record
+cd modules/dns_record   # または modules/app_server / modules/network
 terraform init
 terraform test
 ```

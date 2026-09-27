@@ -61,6 +61,13 @@ variable "admin_password" {
   description = "Password for admin_username. No default on purpose — supply via TF_VAR_admin_password (or an equivalent secret-injection mechanism), never in .tfvars."
   type        = string
   sensitive   = true
+
+  # Sakura Cloud's database appliance only accepts 6-30 characters (API
+  # error "Invalid Password [6-30]"); fail at plan time instead.
+  validation {
+    condition     = length(var.admin_password) >= 8 && length(var.admin_password) <= 30
+    error_message = "Must be 8-30 characters (Sakura Cloud accepts at most 30). e.g. openssl rand -hex 14"
+  }
 }
 
 # --- Restricted application user (DML only: SELECT/INSERT/UPDATE/DELETE on
@@ -78,6 +85,13 @@ variable "app_password" {
   description = "Password for app_username. No default on purpose — supply via TF_VAR_app_password (or an equivalent secret-injection mechanism), never in .tfvars."
   type        = string
   sensitive   = true
+
+  # Sakura Cloud's database appliance only accepts 6-30 characters (API
+  # error "Invalid Password [6-30]"); fail at plan time instead.
+  validation {
+    condition     = length(var.app_password) >= 8 && length(var.app_password) <= 30
+    error_message = "Must be 8-30 characters (Sakura Cloud accepts at most 30). e.g. openssl rand -hex 14"
+  }
 }
 
 variable "database_name" {

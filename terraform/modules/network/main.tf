@@ -8,6 +8,16 @@ resource "sakuracloud_switch" "internal" {
   description = var.description != "" ? var.description : "${var.name_prefix} internal network (app <-> db)"
 }
 
+# Sakura Cloud packet filters take a single host as a bare address and
+# reject a "/32" mask (valid masks are 0-31), while ufw and the rest of this
+# config speak CIDR. Normalize here so callers can keep passing "x.x.x.x/32".
+locals {
+  filter_sources = {
+    for cidr in distinct(concat(var.admin_ssh_cidrs, var.web_allowed_source_cidrs)) :
+    cidr => trimsuffix(cidr, "/32")
+  }
+}
+
 # Inbound filter for the app servers' public-facing ("shared") NIC.
 #
 # Two properties of Sakura Cloud packet filters shape this (phase 21 fix —
@@ -30,7 +40,7 @@ resource "sakuracloud_packet_filter" "app_public" {
     for_each = var.admin_ssh_cidrs
     content {
       protocol         = "tcp"
-      source_network   = expression.value
+      source_network   = local.filter_sources[expression.value]
       destination_port = "22"
       allow            = true
       description      = "SSH from admin CIDR ${expression.value}"
@@ -41,7 +51,7 @@ resource "sakuracloud_packet_filter" "app_public" {
     for_each = var.web_allowed_source_cidrs
     content {
       protocol         = "tcp"
-      source_network   = expression.value
+      source_network   = local.filter_sources[expression.value]
       destination_port = "80"
       allow            = true
     }
@@ -51,7 +61,7 @@ resource "sakuracloud_packet_filter" "app_public" {
     for_each = var.web_allowed_source_cidrs
     content {
       protocol         = "tcp"
-      source_network   = expression.value
+      source_network   = local.filter_sources[expression.value]
       destination_port = "443"
       allow            = true
     }

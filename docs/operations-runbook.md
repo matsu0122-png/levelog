@@ -68,6 +68,7 @@ flowchart TB
    ```bash
    dig NS levelog.matsu0122.com +short   # さくらのクラウードのネームサーバーが返ること
    ```
+1. DBのパスワードは**8〜30文字**(さくらのクラウードのDBアプライアンスは30文字まで)。記号を含まないものにする(`DATABASE_URL`に埋め込むため): `export TF_VAR_db_admin_password="$(openssl rand -hex 14)"`(28文字)、`TF_VAR_db_app_password`も同様。値はパスワード管理ツールに保存する。
 1. `terraform/environments/{staging,production}`それぞれで`terraform.tfvars.example`を`terraform.tfvars`にコピーし(`.gitignore`済み)、非秘密値を埋める。秘密値(`db_admin_password`等)は`TF_VAR_*`環境変数で渡す。
 2. `terraform init`
 3. `terraform plan`で内容を確認する。**この段階で初めて実際のさくらのクラウードAPIへ到達する。** それまでのすべてのフェーズでの検証は、認証情報なしでエラー終了することの確認までに留めてきた。

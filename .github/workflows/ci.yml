@@ -188,11 +188,13 @@ jobs:
       # `terraform test` with mock providers: exercises module logic (e.g.
       # modules/dns_record's exact-zone-name check) with no credentials and
       # no cloud API calls, same rule as terraform-validate above.
-      - name: modules/dns_record
-        working-directory: terraform/modules/dns_record
+      - name: terraform test (dns_record / app_server / network)
         run: |
-          terraform init -input=false
-          terraform test
+          for m in dns_record app_server network; do
+            echo "::group::modules/$m"
+            (cd "terraform/modules/$m" && terraform init -input=false && terraform test)
+            echo "::endgroup::"
+          done
 
   monitoring-rules:
     name: Alert rules (promtool check / unit test)

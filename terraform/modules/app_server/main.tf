@@ -13,16 +13,38 @@ resource "sakuracloud_ssh_key" "deploy" {
 # see docs/monitoring-design.md for why and docs/app-server-design.md for
 # the rest of this script's rationale). Actually deploying the app itself
 # happens later, via CD (phase 13).
-resource "sakuracloud_note" "provision" {
-  name  = "${var.name_prefix}-app-provision"
-  class = "shell"
-  content = templatefile("${path.module}/templates/startup.sh.tftpl", {
+locals {
+  startup_script_full = templatefile("${path.module}/templates/startup.sh.tftpl", {
     deploy_user              = var.deploy_user
     ssh_public_key           = var.ssh_public_key
     environment_name         = var.environment_name
     admin_ssh_cidrs          = var.admin_ssh_cidrs
     web_allowed_source_cidrs = var.web_allowed_source_cidrs
   })
+
+  # Sakura Cloud rejects a note (startup script) longer than 10000
+  # characters, and the commented template is well over that. Comments
+  # stay in the template for readers; only the uploaded copy drops them:
+  # whole-line shell comments ("# ..." or a bare "#", NOT "#!" shebangs of
+  # the scripts written out by heredocs) and whole-line "//" comments in the
+  # embedded Alloy config. No line of real code starts with either.
+  startup_script = join("\n", [
+    for line in split("\n", local.startup_script_full) : line
+    if !can(regex("^\\s*(#( |$)|//)", line))
+  ])
+}
+
+resource "sakuracloud_note" "provision" {
+  name    = "${var.name_prefix}-app-provision"
+  class   = "shell"
+  content = local.startup_script
+
+  lifecycle {
+    precondition {
+      condition     = length(local.startup_script) <= 10000
+      error_message = "Startup script is ${length(local.startup_script)} characters; Sakura Cloud accepts at most 10000. Shorten templates/startup.sh.tftpl."
+    }
+  }
 }
 
 resource "sakuracloud_disk" "boot" {
