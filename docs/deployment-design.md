@@ -42,12 +42,13 @@ flowchart LR
 
 - Terraformで管理しているのはサーバー本体・ネットワークのみで、コンテナオーケストレーション基盤(Kubernetes等)は導入していない(現状の規模ではオーバースペックと判断、既存方針を踏襲)。そのため、デプロイは**SSH経由でdocker composeを操作する**シンプルな方式とした。
 - `.github/scripts/deploy-host.sh`(CIランナー上で実行): 対象ホスト1台に対して
-  1. `docker-compose.prod.yml`を`scp`で`/opt/levelog/docker-compose.prod.yml`へ同期(常にリポジトリの最新版を反映)
+  1. `docker-compose.prod.yml`と`.github/scripts/smoke-test.sh`を`scp`で`/opt/levelog/`へ同期(常にリポジトリの最新版を反映)
   2. SSH接続し、`secrets.GITHUB_TOKEN`で`docker login ghcr.io`(このジョブの実行中のみ有効なトークンを都度使用。長期間有効な認証情報をサーバー側に永続化しない設計)
   3. `/opt/levelog/deploy.sh`を`IMAGE_TAG`環境変数付きで実行
   4. `docker logout ghcr.io`(`trap`で保証)
+  5. (フェーズ19で追加)サーバー上で`/opt/levelog/smoke-test.sh`を実行。`/health/ready`はDB疎通しか見ていないため、Nginx→api→DBの実際のリクエスト経路(未認証の401、存在しないユーザーでのログインの401など、データを書き込まないもの)と証明書の残り日数を確認する。失敗するとジョブが失敗し、productionでは2台目へのデプロイに進まない(matrixの`fail-fast`)
 - `/opt/levelog/deploy.sh`(各アプリサーバ上、フェーズ10の起動スクリプトで事前配置済み): `docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d`を実行し、`/health/ready`が200を返すまで最大60秒ポーリングして確認する。失敗時は非ゼロで終了し、ワークフローを失敗させる。
-- **ローリングデプロイ**: production環境はGitHub Actionsの`strategy.matrix` + `max-parallel: 1`で、2台のアプリサーバを**常に1台ずつ順番に**デプロイする(同時に両方落とさない)。1台目のデプロイ(pull→up→ヘルスチェック)が成功して初めて2台目に進む。ロードバランサ(フェーズ11)は`/health/ready`に基づいて自動的にトラフィックを振り分けるため、デプロイ中の1台はLBから自動的に除外される想定(実際の動作確認はフェーズ17の片系停止試験で行う)。
+- **ローリングデプロイ**: production環境はGitHub Actionsの`strategy.matrix` + `max-parallel: 1`で、2台のアプリサーバを**常に1台ずつ順番に**デプロイする(同時に両方落とさない)。1台目のデプロイ(pull→up→ヘルスチェック→スモークテスト)が成功して初めて2台目に進む。ロードバランサ(フェーズ11)は`/health/ready`に基づいて自動的にトラフィックを振り分けるため、デプロイ中の1台はLBから自動的に除外される想定(実際の動作確認はフェーズ17の片系停止試験で行う)。
 - **`.env`はCIが作成・変更しない**: `DATABASE_URL` / `FRONTEND_ORIGIN` / `COOKIE_DOMAIN` / `TLS_CERT_DIR`等の秘密情報を含む`.env`ファイルは、`/opt/levelog/.env`にサーバー初期構築時に一度だけ手動で作成する運用とした(自動化しない理由: これらの値をGitHub Secretsからサーバーへ転送する経路を作ると、CIの実行権限を持つ者が事実上本番DBの認証情報を扱えることになり、攻撃対象領域が広がるため。台数が2〜3台規模の現状では、初回構築時の手動作業で十分と判断)。`docker-compose.prod.yml`は`.env`ファイルを同じディレクトリから自動的に読み込む(Docker Composeの標準動作)ため、デプロイスクリプト側で`.env`を明示的に指定する必要はない。
 
 ## 4. マイグレーション実行の排他制御(フェーズ1からの継続課題の解消)

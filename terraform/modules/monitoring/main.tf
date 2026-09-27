@@ -17,3 +17,24 @@ resource "sakuracloud_simple_monitor" "uptime" {
     status   = "200"
   }
 }
+
+# Certificate expiry, checked from outside like the uptime check above.
+# Renewal itself is automated on every app server (certbot.timer + the
+# deploy hook installed by terraform/modules/app_server — see
+# docs/tls-design.md section 4), so this firing means that automation has
+# silently stopped working, with `cert_remaining_days` left to fix it by
+# hand. Let's Encrypt certs are renewed at 30 days remaining, so a
+# threshold below that never fires while renewal is healthy.
+resource "sakuracloud_simple_monitor" "cert_expiry" {
+  target               = var.target
+  delay_loop           = var.cert_check_delay_loop_seconds
+  notify_email_enabled = var.notify_email_enabled
+  notify_slack_enabled = var.notify_slack_webhook != ""
+  notify_slack_webhook = var.notify_slack_webhook != "" ? var.notify_slack_webhook : null
+
+  health_check {
+    protocol       = "sslcertificate"
+    remaining_days = var.cert_remaining_days
+    verify_sni     = true
+  }
+}

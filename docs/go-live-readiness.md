@@ -1,6 +1,6 @@
 # 公開判定(Go-Live Readiness)
 
-最終更新: 2026-09-23(フェーズ18)
+最終更新: 2026-09-27(フェーズ19)
 
 ## 判定結果: 条件付きGO
 
@@ -37,13 +37,13 @@
 
 公開そのものを妨げないが、公開後なるべく早く対応すべき。
 
-- Grafana Cloudアカウントの作成とアラートルールの実装(`docs/monitoring-design.md`6節) — これがないと、性能劣化やエラー率上昇を能動的に検知する手段が外形監視(死活のみ)しかない。
+- Grafana Cloudアカウントの作成と、アラートルールの登録(`docs/monitoring-design.md`6.1節) — ルール自体はフェーズ19でコード化・単体テスト済み(`monitoring/alerts/`)で、アカウントができれば`mimirtool`コマンド1回で登録できる。登録しないと、性能劣化やエラー率上昇を能動的に検知する手段が外形監視(死活・証明書期限)しかない。
 - GitHub Environment `production`のRequired reviewers設定 — 未設定のままだと、誰でも(リポジトリへの書き込み権限があれば)productionへ直接デプロイできてしまう。
-- TLS証明書の実際の発行・自動更新の実装 — 現状は手動更新が前提の設計。
+- TLS証明書の実際の発行 — 初回の1回だけ手動(`docs/operations-runbook.md`2.3節)。自動更新と、更新が止まったときの外形監視での検知はフェーズ19で実装済み。
 
 ## 4. 長期的な改善事項(公開を妨げない)
 
-`docs/operations-runbook.md`8節の表を参照。Terraform stateのリモートbackend移行、DB冗長構成(フェイルオーバー)、デプロイ後の自動スモークテストなど。
+`docs/operations-runbook.md`8節の表を参照。Terraform stateのリモートbackend移行、DB冗長構成(フェイルオーバー)など。デプロイ後の自動スモークテストはフェーズ19で実装済み。
 
 ## 5. この判定の限界
 

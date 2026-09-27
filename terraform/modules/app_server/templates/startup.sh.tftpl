@@ -8,7 +8,7 @@ export DEBIAN_FRONTEND=noninteractive
 # --- OS baseline -------------------------------------------------------
 apt-get update
 apt-get -y upgrade
-apt-get -y install curl ca-certificates gnupg ufw fail2ban unattended-upgrades certbot
+apt-get -y install curl ca-certificates gnupg ufw fail2ban unattended-upgrades certbot python3-certbot-dns-sakuracloud
 
 # Automatic security updates (unattended-upgrades ships with a sane
 # Ubuntu default config; this just turns it on).
@@ -88,14 +88,53 @@ usermod -aG docker ${deploy_user}
 mkdir -p /opt/levelog
 chown ${deploy_user}:${deploy_user} /opt/levelog
 
-# Where docker-compose.prod.yml's TLS_CERT_DIR mount points at. certbot is
-# installed above, but actually issuing the certificate is a deliberate
-# manual/documented step (needs DNS API credentials for the DNS-01
-# challenge this multi-backend-behind-an-LB setup calls for) rather than
-# something this unattended boot script can complete on its own — see
-# docs/tls-design.md.
+# Where docker-compose.prod.yml's TLS_CERT_DIR mount points at. certbot and
+# the official Sakura Cloud DNS plugin are installed above, but the FIRST
+# issuance is a deliberate manual step (docs/operations-runbook.md 2.3): it
+# needs a Sakura Cloud API key in /etc/letsencrypt/sakuracloud.ini, which
+# this script never creates — same rule as .env and monitoring.env. What
+# this script does set up is everything after that, so renewal needs no
+# human: Ubuntu's certbot package ships certbot.timer (twice-daily
+# `certbot renew`, which reuses the DNS-01 authenticator recorded at
+# issuance), and the deploy hook below copies each renewed cert into
+# /opt/levelog/tls and reloads Nginx. See docs/tls-design.md section 4.
 mkdir -p /opt/levelog/tls
 chown ${deploy_user}:${deploy_user} /opt/levelog/tls
+
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+cat >/etc/letsencrypt/renewal-hooks/deploy/levelog.sh <<'EOF'
+#!/bin/bash
+# certbot deploy hook: runs after every successful issuance/renewal, with
+# RENEWED_LINEAGE pointing at /etc/letsencrypt/live/<name>. Installed by
+# terraform/modules/app_server; see docs/tls-design.md section 4.
+set -euo pipefail
+
+: "$${RENEWED_LINEAGE:?RENEWED_LINEAGE must be set (run by certbot)}"
+dest=/opt/levelog/tls
+
+# nginx-unprivileged runs as uid/gid 101 inside the web container and is
+# the only reader of the key. Written to temp names and renamed so Nginx
+# can never load a half-written pair.
+install -o 101 -g 101 -m 0644 "$RENEWED_LINEAGE/fullchain.pem" "$dest/.fullchain.pem.new"
+install -o 101 -g 101 -m 0400 "$RENEWED_LINEAGE/privkey.pem" "$dest/.privkey.pem.new"
+mv -f "$dest/.fullchain.pem.new" "$dest/fullchain.pem"
+mv -f "$dest/.privkey.pem.new" "$dest/privkey.pem"
+
+# Graceful reload (in-flight connections finish on the old cert). Found by
+# Compose labels rather than via `docker compose`, so this doesn't need
+# /opt/levelog/.env to interpolate the compose file. No running web
+# container (first issuance, before the first deploy) is fine: it reads
+# the files when it starts.
+web="$(docker ps -q --filter label=com.docker.compose.project=levelog --filter label=com.docker.compose.service=web)"
+if [ -n "$web" ]; then
+  docker exec "$web" nginx -s reload
+  echo "levelog deploy hook: installed renewed certificate and reloaded nginx"
+else
+  echo "levelog deploy hook: installed certificate (web container not running, no reload)"
+fi
+EOF
+chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/levelog.sh
+systemctl enable --now certbot.timer
 
 # Invoked over SSH by .github/workflows/cd.yml (see docs/deployment-design.md,
 # phase 13). Contains no secrets itself — docker-compose.prod.yml is synced
@@ -210,6 +249,7 @@ loki.source.docker "default" {
 	forward_to = [loki.write.grafana_cloud.receiver]
 	labels = {
 		environment = "${environment_name}",
+		host        = constants.hostname,
 	}
 }
 
@@ -249,8 +289,13 @@ prometheus.remote_write "grafana_cloud" {
 			password = sys.env("GRAFANA_CLOUD_API_KEY")
 		}
 	}
+	// host: every server scrapes the same 127.0.0.1 addresses, so without
+	// it production's two app servers would push identical series (same
+	// instance="127.0.0.1:9090") and clobber each other in Grafana Cloud.
+	// The alert rules in monitoring/alerts/ aggregate and group by it.
 	external_labels = {
 		environment = "${environment_name}",
+		host        = constants.hostname,
 	}
 }
 EOF

@@ -51,9 +51,15 @@ flowchart LR
 
 - ロードバランサがL4パススルーであるため、Let's Encrypt等のACME認証局によるHTTP-01チャレンジは、2台あるアプリサーバのどちらが検証リクエストを受け取るか制御できないという問題がある(共有Webルート同期の仕組みを別途用意しない限り、不安定になりうる)。
 - そのため、**DNS-01チャレンジを推奨方式とする**。DNS-01は特定のバックエンドに依存せず、DNSのTXTレコードで検証が完結する。
-- アプリサーバの起動スクリプト(フェーズ10、本フェーズで追記)に`certbot`のインストールを追加済み。ただし、実際の証明書発行コマンド(DNS APIの認証情報を要する)は、起動時に自動実行するのではなく、**手動(または別途のプロビジョニング手順)で実行する**設計とした。理由: DNS APIの認証情報を起動スクリプトに埋め込むこと自体がリスクであり、また、さくらのクラウードDNS向けのcertbot DNSプラグインの正式な選定・動作確認ができていないため、断定的な自動化コードを書くことを避けた。
-- 発行された証明書(`fullchain.pem` / `privkey.pem`)は、アプリサーバ上の`/opt/levelog/tls/`(起動スクリプトで作成済み)に配置し、`docker-compose.prod.yml`の`TLS_CERT_DIR`環境変数からそのパスをマウントする設計とした。
-- 更新(renewal)は、`certbot renew`を定期実行するcronまたはsystemdタイマーを設定し、更新後にNginxコンテナを再起動(`docker compose restart web`または`nginx -s reload`相当)する運用手順を、実際にDNSプラグインを選定した時点で確定する。
+- **DNSプラグイン(フェーズ19で確定)**: certbot公式の`certbot-dns-sakuracloud`を使う。certbot本体と同じリポジトリ(`certbot/certbot`)でメンテナンスされており、Ubuntu 24.04(`os_type = ubuntu2404`)の公式パッケージ`python3-certbot-dns-sakuracloud`としても提供されている(noble/universe、2.9.0-1で確認)。起動スクリプトで`certbot`と一緒にインストールする。
+- **初回発行は手動**: さくらのクラウードのAPIキーを`/etc/letsencrypt/sakuracloud.ini`(0600)に置き、`certbot certonly --authenticator dns-sakuracloud ...`を1回実行する(コマンドは`docs/operations-runbook.md`2.3節)。APIキーを起動スクリプトやTerraformに埋め込まない方針は、`.env`・`monitoring.env`と同じ。
+- **更新は自動(フェーズ19で実装)**:
+  - Ubuntuの`certbot`パッケージに付属する`certbot.timer`(1日2回`certbot renew`、残り30日を切った証明書を更新)を起動スクリプトで有効化する。`certbot renew`は初回発行時に記録された認証方式(DNS-01・認証情報ファイルの場所)をそのまま再利用するので、追加の設定はいらない。
+  - 起動スクリプトが`/etc/letsencrypt/renewal-hooks/deploy/levelog.sh`を配置する。発行・更新が成功するたびに、証明書を`/opt/levelog/tls/`へコピーし(`nginx-unprivileged`のuid 101が所有、秘密鍵は0400。一時ファイルに書いてからrenameするので、書きかけのファイルを読まれることはない)、稼働中の`web`コンテナで`nginx -s reload`を実行する(既存の接続は切らない)。`web`コンテナが見つからない場合(初回発行が初回デプロイより前など)は、コピーだけしてコンテナの起動時に読ませる。
+  - ローカル検証: 本番構成(`docker-compose.prod.yml`)を起動した状態で、別の証明書を`RENEWED_LINEAGE`としてフックを実行した。コンテナを再起動せずに、配信される証明書が新しいものに切り替わることを確認した。
+- **2台構成での扱い**: DNS-01はどのサーバーが検証を受けるかに依存しないため、production 2台はそれぞれ独立に同じドメインの証明書を発行・更新する(1節の「全サーバーに同じ証明書」は「同じドメインに対する有効な証明書」で満たされる。証明書そのものが別物でも、クライアントから見て問題はない)。Let's Encryptの同一ドメイン重複発行の制限(週5回)に対して、2台で90日ごとなので十分余裕がある。
+- **更新が止まったときの検知(二重)**: (1) さくらのクラウードの外形監視に`sslcertificate`チェックを追加した(`terraform/modules/monitoring`の`cert_expiry`、残り14日未満で通知)。正常なら30日前に更新されるので、これが通知するのは自動更新が壊れているときだけ。(2) デプロイ後のスモークテスト(`.github/scripts/smoke-test.sh`)も、配信中の証明書の残りが14日未満ならデプロイを失敗させる。
+- 証明書(`fullchain.pem` / `privkey.pem`)の配置先は`/opt/levelog/tls/`(起動スクリプトで作成)で、`docker-compose.prod.yml`の`TLS_CERT_DIR`がこのパスをマウントする。
 
 ## 5. ローカル検証(自己署名証明書)
 
@@ -116,7 +122,7 @@ flowchart LR
 ## 9. 未確定・今後の判断が必要な事項
 
 - `matsu0122.com`ゾーンの現在の管理場所の確認(DNS変更前に必須)
-- DNS-01チャレンジ用のcertbotプラグインの選定(さくらのクラウードDNS向けの実在プラグインの確認、または手動TXTレコード運用)
-- 証明書更新の自動化(cron/systemdタイマー、更新後のNginx再読み込み)の具体的な実装
+- ~~DNS-01チャレンジ用のcertbotプラグインの選定~~ → フェーズ19で`certbot-dns-sakuracloud`に確定(4節)。ただし`matsu0122.com`ゾーンがさくらのクラウードDNSで管理されていることが前提
+- ~~証明書更新の自動化~~ → フェーズ19で実装(4節)
 - ロードバランサの`assigned_ip_addresses`の実際の並び順・予約アドレスの確認(初回`apply`後)
 - 片系停止試験の実施(フェーズ17)
