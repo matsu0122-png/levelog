@@ -13,6 +13,12 @@ RUN npm run build
 # nginx-unprivileged already listens on 8080 and runs as a non-root user
 # out of the box, so no extra user/permission setup is needed here.
 FROM nginxinc/nginx-unprivileged:1.30-alpine
+# Pull in Alpine security fixes that landed after the base image was last
+# rebuilt (e.g. libexpat CVE-2026-93990, caught by CI's Trivy scan). Needs
+# root for apk; switch back to the image's own non-root user (101) after.
+USER root
+RUN apk upgrade --no-cache
+USER 101
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY nginx-locations.conf /etc/nginx/snippets/nginx-locations.conf
 COPY --from=build /app/dist /usr/share/nginx/html
