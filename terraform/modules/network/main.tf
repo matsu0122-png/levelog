@@ -9,10 +9,19 @@ resource "sakuracloud_switch" "internal" {
 }
 
 # Inbound filter for the app servers' public-facing ("shared") NIC.
-# Rule order doesn't affect correctness here (every rule below is an allow,
-# and nothing overlaps another rule's port), but SSH is listed first as the
-# most security-sensitive rule. Anything not explicitly allowed is dropped
-# by the implicit final deny — there is no catch-all allow rule.
+#
+# Two properties of Sakura Cloud packet filters shape this (phase 21 fix —
+# the original version assumed the opposite of both):
+#   - A packet that matches no rule is ALLOWED. Only the explicit "deny all"
+#     rule at the end makes this an allow-list; without it the SSH
+#     restriction above it would restrict nothing.
+#   - Filters are stateless. Replies to connections the server itself opens
+#     (apt, Docker Hub/GHCR pulls, certbot, DNS lookups, Grafana Cloud
+#     pushes) arrive on the Linux ephemeral port range and need their own
+#     allow rules, as do IP fragments. Same set as the provider's own
+#     example (sacloud/terraform-provider-sakuracloud, packet_filter docs).
+# Rules are evaluated in order, first match wins, so "deny all" must stay
+# last.
 resource "sakuracloud_packet_filter" "app_public" {
   name        = "${var.name_prefix}-app-public"
   description = "Public-facing NIC filter for app servers: SSH from admin IPs only, HTTP/HTTPS from web_allowed_source_cidrs, ICMP; everything else denied"
@@ -51,5 +60,43 @@ resource "sakuracloud_packet_filter" "app_public" {
   expression {
     protocol = "icmp"
     allow    = true
+  }
+
+  expression {
+    protocol    = "fragment"
+    allow       = true
+    description = "IP fragments (stateless filter)"
+  }
+
+  # Return traffic for outbound connections (Linux ephemeral ports,
+  # net.ipv4.ip_local_port_range = 32768-60999).
+  expression {
+    protocol         = "tcp"
+    destination_port = "32768-61000"
+    allow            = true
+    description      = "Return traffic (TCP ephemeral ports)"
+  }
+
+  expression {
+    protocol         = "udp"
+    destination_port = "32768-61000"
+    allow            = true
+    description      = "Return traffic (UDP ephemeral ports, e.g. DNS replies)"
+  }
+
+  # DHCP replies: without this the NIC can lose its address on lease
+  # renewal once "deny all" below is in place.
+  expression {
+    protocol         = "udp"
+    source_port      = "67"
+    destination_port = "68"
+    allow            = true
+    description      = "DHCP replies"
+  }
+
+  expression {
+    protocol    = "ip"
+    allow       = false
+    description = "Deny all (must stay last: unmatched packets are otherwise allowed)"
   }
 }
